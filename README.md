@@ -14,7 +14,7 @@ src/team_harness/         # 持续演进的 Agent 与 Harness 实现
 examples/lesson04/        # 本讲入口与独立编写的教学夹具
 tests/                   # 实际行为验收
 pyproject.toml            # Python 与直接依赖约束
-uv.lock                  # 完整依赖锁定
+uv.lock                  # 运行时依赖锁定
 ```
 
 后续按「Agent Loop → 模型适配 → 工具调用 → 运行记录」逐步增加实际需要的模块。当前只实现工具层，不预建空目录或多 Agent 框架。团队任务与审批、模型建议、业务系统判定分别保留自己的职责。
@@ -26,13 +26,14 @@ uv.lock                  # 完整依赖锁定
 环境：macOS 或 Linux、Python 3.12、JDK 17、uv。复现本文版本：
 
 ```bash
-git checkout lesson-04
+git clone --branch lesson-04 https://github.com/MageByte-Zero/harness-engineering-lab.git
+cd harness-engineering-lab
 uv sync --frozen
 uv run --frozen python examples/lesson04/demo.py
 uv run --frozen python -m unittest discover -s tests -v
 ```
 
-尚未推送标签时，使用作者提供的本讲 ZIP 资料包，在解压根目录运行以上命令（省略 `git checkout`）。ZIP 与标签源码一致；不要假设 GitHub 已经存在本地标签。
+已有克隆可先执行 `git fetch origin --tags`，再执行 `git switch --detach lesson-04`。每讲从对应标签取得完整代码，不另发压缩包。
 
 默认夹具独立编写，只包含 `(100, 500]` 的四个合成输入，不包含公司源码、客户数据或完整风控实现。成功返回 `status=passed`、`exit_code=0`，输出 `4 boundary checks passed`。
 
