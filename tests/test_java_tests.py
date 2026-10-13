@@ -33,6 +33,16 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             del os.environ["LESSON_TEST_API_KEY"]
 
+    async def test_secret_crossing_excerpt_boundary_is_redacted_before_truncation(self):
+        secret = "lesson-four-boundary-secret-456"
+        os.environ["LESSON_TEST_API_KEY"] = secret
+        try:
+            script = "print('x' * 7995 + '" + secret + "')"
+            result = await runner.run_command([sys.executable, "-c", script], Path.cwd(), 2.0)
+            self.assertNotIn("less", result.stdout, "a secret prefix survived truncation")
+        finally:
+            del os.environ["LESSON_TEST_API_KEY"]
+
     async def test_timeout_and_cancel_stop_descendant_work(self):
         # Removing process-group cleanup lets the grandchild write this marker.
         for cancel in (False, True):

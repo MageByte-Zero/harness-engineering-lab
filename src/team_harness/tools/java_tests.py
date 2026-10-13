@@ -25,7 +25,8 @@ class ToolResult(BaseModel):
 
 def read_excerpt(stream, secrets: list[str]) -> str:
     stream.seek(0)
-    text = stream.read(OUTPUT_LIMIT + 1).decode("utf-8", errors="replace")
+    lookahead = max((len(secret.encode("utf-8")) for secret in secrets), default=1)
+    text = stream.read(OUTPUT_LIMIT + lookahead).decode("utf-8", errors="replace")
     for secret in secrets:
         text = text.replace(secret, "[REDACTED]")
     return text[:OUTPUT_LIMIT] + ("\n[truncated]" if stream.tell() > OUTPUT_LIMIT else "")
