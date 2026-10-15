@@ -1,0 +1,2 @@
+SYNTHETIC teaching input; not production telemetry.
+request_id=normal policy=(100,500] value=101 matched=true

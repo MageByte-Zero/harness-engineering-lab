@@ -1,23 +1,25 @@
 # Harness 企业实战：配套代码
 
-本仓库是「Harness 企业实战专栏」的公开代码仓库，面向 Java 后端开发者，逐步用 Python 构建团队研发 Agent 工作系统。
+本仓库是「Harness 企业实战专栏」的公开代码仓库，面向有 Java、Go 或 Python 基础的后端开发者，逐步用 Python 构建团队研发 Agent 工作系统。
 
 ## 当前状态
 
-第 4 讲提供 Python 工具执行器：运行固定 Java 测试，区分通过、失败、超时与取消，清理子进程并返回结构化结果。尚未接入模型或 Agent Loop。
+第 4 讲提供 Python 工具执行器：运行固定 Java 测试，区分通过、失败、超时与取消，清理子进程并返回结构化结果。第 5 讲在其上增加只读调查循环、Responses API 接入、证据引用校验和最小运行记录。离线协议与真实工具已验证；模型实测状态见第 5 讲说明。
 
 ## 逐讲演进的结构
 
 ```text
 src/team_harness/         # 持续演进的 Agent 与 Harness 实现
   tools/java_tests.py     # 第 4 讲：受控 Java 测试工具
-examples/lesson04/        # 本讲入口与独立编写的教学夹具
+  investigation.py       # 第 5 讲：只读调查与模型工具循环
+examples/lesson04/        # 第 4 讲入口与独立编写的教学夹具
+examples/lesson05/        # 第 5 讲入口、合成日志与开发集
 tests/                   # 实际行为验收
 pyproject.toml            # Python 与直接依赖约束
 uv.lock                  # 运行时依赖锁定
 ```
 
-后续按「Agent Loop → 模型适配 → 工具调用 → 运行记录」逐步增加实际需要的模块。当前只实现工具层，不预建空目录或多 Agent 框架。团队任务与审批、模型建议、业务系统判定分别保留自己的职责。
+后续按「Agent Loop → 模型适配 → 工具调用 → 运行记录」逐步增加实际需要的模块。当前实现工具层与最小只读 Loop，不预建多 Agent 框架。团队任务与审批、模型建议、业务系统判定分别保留自己的职责。
 
 每讲使用 `lesson-NN` 标签固定源码版本；第 4 讲为 `lesson-04`。标签只在对应版本验收后建立，不覆盖已有章节标签。Git 推送与公开发布按作者授权另行执行。
 
@@ -73,3 +75,46 @@ uv run --frozen python examples/lesson04/demo.py --backend-dir /path/to/your/bac
 git clone https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
 ```
+
+## 第 5 讲：只读排查 Agent
+
+第 4 讲实现与命令保持不变。第 5 讲新增 `src/team_harness/investigation.py`，
+入口 `examples/lesson05/demo.py`，三个独立合成样本和人工标签位于同目录。
+本讲固定版本为 `lesson-05`，已有标签不移动。取得本讲代码后从仓库根目录运行：
+
+```bash
+git clone --branch lesson-05 https://github.com/MageByte-Zero/harness-engineering-lab.git
+cd harness-engineering-lab
+uv sync --frozen
+uv run --frozen python examples/lesson05/demo.py --mode scripted --case boundary
+uv run --frozen python examples/lesson05/eval.py --mode scripted
+uv run --frozen python -m unittest discover -s tests -v
+```
+
+已有克隆先执行 `git fetch origin --tags`，再执行 `git switch --detach lesson-05`。
+
+`scripted` 是固定工具选择与答案的协议替身，不调用真实模型；日志读取和 Java 测试实际执行。
+`boundary` 在 value=100 的植入故障上返回测试失败，`normal` 的四边界检查通过，
+`missing` 缺失输入与版本、返回 unknown。运行记录保存在 `runs/`，不自动提交。
+记录中每次响应、工具结果、call_id、证据编号、停止原因均保留；未知 usage 为 null。
+可用 `--max-turns 1` 观察 `step_limit` 与退出码 1，失败同样留存 JSON。
+
+真实调用使用 OpenAI Responses HTTPS API，不读取 CLI 登录态或个人订阅。自行在当前终端
+安全设置 `OPENAI_API_KEY` 与 `OPENAI_MODEL`（支持 function calling 与 json_schema 的实际可用模型），
+不要把密钥放入命令历史、源码或运行记录。然后执行：
+
+```bash
+uv run --frozen python examples/lesson05/demo.py --mode agent --case boundary
+uv run --frozen python examples/lesson05/eval.py --mode direct --output-dir runs/lesson05-direct
+uv run --frozen python examples/lesson05/eval.py --mode agent --output-dir runs/lesson05-agent
+```
+
+API 有网络、地区、项目权限和计费条件；HTTP 超时 60 秒，不自动重试，重定向拒绝。
+认证、限流或不支持的模型返回错误时停止，并在 run 中保留异常类别与 HTTP 状态。
+未配置凭据时离线协议验证可以完成，但不算真实模型 Agent 跑通。
+
+直接模式只有原问题、不取证，Agent 模式可读取限定日志和测试。两者比较的是取证流程，
+不是在相同信息下证明模型能力提升。三例是开发集，不是独立测试集；布尔标签只检查状态、
+特征文字和必要工具，语义是否得到证据支持仍需人工核对。引用校验只能阻止引用不存在的
+编号或伪造引文，不能证明推论正确。本讲不修改业务源码、不部署服务，固定测试会启动 Java，
+仍沿用第 4 讲的可信本地教学环境和 POSIX 进程边界，不是生产沙箱。
