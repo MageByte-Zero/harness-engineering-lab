@@ -1,8 +1,63 @@
-# Harness 企业实战：配套代码
+# AI Agent 应用实战：配套代码
 
-本仓库是「Harness 企业实战专栏」的公开代码仓库，面向有 Java、Go 或 Python 基础的后端开发者，逐步用 Python 构建团队研发 Agent 工作系统。
+本仓库面向有 Java、Go 或 Python 基础的后端开发者，使用 Python 与现成开源组件逐步实现企业技术支持 Agent。TaskHub 是独立设计的合成教学产品，不包含公司源码或真实客户数据。
 
-## 当前状态
+## 第二版：当前开发版本
+
+新版入口位于 `examples/v2/`，实现位于 `src/support_agent/`。第 01–03 讲分别增加带资料问答、提示词对照、结构化输出与业务校验；第 04–05 讲接入真实本地查询 API 和 LangChain Agent。后续各阶段的完成情况以实际运行记录为准，不把规划当作已经实现。
+
+新版代码在 `main` 分支持续开发，逐讲标签尚未发布；旧版 `lesson-04`、`lesson-05` 对应下方历史案例，不能作为新版入口。修订标签计划为 `lesson-NN-v2`，实际发布后再列出固定版本。
+
+在仓库根目录使用 Python 3.12 与 uv：
+
+```bash
+uv sync --locked
+test -e .env || cp .env.example .env
+```
+
+仅在尚无 `.env` 时复制模板；已有配置不要覆盖。在本地填写 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。地址采用服务提供的 OpenAI-compatible Chat Completions Base URL，SDK 自动补请求路径。密钥不进入版本库，模型服务按实际资源计费。
+
+如果本机必须通过 SOCKS 代理访问模型，当前环境还需安装对应支持：`uv pip install socksio==1.0.0`。这是网络环境的可选依赖，应用不自动关闭代理。`uv sync --locked` 后如缺少该包，重新安装即可。
+
+```bash
+uv run python examples/v2/01_ask.py --prepare-only --output runs/v2/01-prepared.json
+uv run python examples/v2/01_ask.py --output runs/v2/01-with-docs.json
+uv run python examples/v2/02_prompt.py --output runs/v2/02-first
+uv run python examples/v2/03_structured.py --question 'TaskHub Webhook 的签名应该如何验证？' --output runs/v2/03-signature.json
+uv run python -m pytest -q
+```
+
+输出文件/目录需使用新路径，保留每次结果。提示词对照计划为 12 次真实请求，API 错误也会记录。结构化输出先检查完整性、类型、引用和澄清一致性；引用存在不证明事实正确。模型别名 `auto` 不提供稳定底层模型身份；测试替身通过不能代替真实模型验收。
+
+### 第 04–05 讲：运行工具查询
+
+第 04 讲先在一个终端启动合成业务服务：
+
+```bash
+uv run uvicorn services.taskhub.app:app --host 127.0.0.1 --port 8004
+```
+
+另一个终端在相同仓库根目录运行：
+
+```bash
+uv run python examples/v2/04_agent.py --question '投递 d-104 一直失败，帮我看看怎么处理。' --output runs/v2/04-delivery.json
+```
+
+第 05 讲将服务启动端口改为 8005，再运行：
+
+```bash
+uv run python examples/v2/05_agent.py --question '投递 d-105 返回 429，现在应该怎么处理？' --output runs/v2/05-multistep.json
+```
+
+框架负责循环，内置中间件分别限制模型和工具调用次数。教学服务绑定固定项目，不代表生产鉴权。停止原因与 `business_review` 分开保存；模型返回回答也需要人工核对。
+
+2026-10-16：干净源码快照执行 `uv sync --locked`、无需密钥的输入准备与 55 项测试通过。真实模型已完成文档问答、结构化回答、三组工具任务和一次两步查询。提示词比较 12 次中仅 3 次成功、9 次超时，不据此判断提示词质量提升。确定性故障测试不冒充线上模型表现，当前也尚无页面、会话持久化、审批写入或部署验收。
+
+## 第一版历史案例
+
+以下内容与命令保留旧标签语义，第二版无需先完成 Java 工具案例。
+
+### 第一版状态
 
 第 4 讲提供 Python 工具执行器：运行固定 Java 测试，区分通过、失败、超时与取消，清理子进程并返回结构化结果。第 5 讲在其上增加只读调查循环、Responses API 接入、证据引用校验和最小运行记录。离线协议与真实工具已验证；模型实测状态见第 5 讲说明。
 

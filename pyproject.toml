@@ -7,7 +7,21 @@ name = "team-harness-lab"
 version = "0.1.0"
 description = "Incremental Harness course lab for Java developers"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pydantic==2.12.5"]
+dependencies = [
+    "fastapi>=0.143.2",
+    "httpx>=0.28.1",
+    "langchain>=1.4.6",
+    "langchain-openai>=1.7.2",
+    "openai>=3.31.0",
+    "pydantic==2.12.5",
+    "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
