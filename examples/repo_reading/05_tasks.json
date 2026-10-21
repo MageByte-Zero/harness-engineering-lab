@@ -1,0 +1,22 @@
+[
+  {
+    "id": "full-chain",
+    "repo": "fixtures/order-service",
+    "question": "查询单个订单的 HTTP 接口在哪里？它如何取得订单，订单不存在时返回什么？请给出源码依据。"
+  },
+  {
+    "id": "data-source",
+    "repo": "fixtures/order-service",
+    "question": "订单查询从哪里取得数据？当前源码用了数据库吗？请给出源码依据，不必展开 HTTP 入口和异常映射。"
+  },
+  {
+    "id": "missing-mapping",
+    "repo": "fixtures/order-service-missing",
+    "question": "查询不存在的订单时，源码能确认抛出什么异常，以及最终 HTTP 状态码和响应体吗？只报告当前源码支持的结论和缺口，不根据框架默认行为推测。"
+  },
+  {
+    "id": "incident",
+    "repo": "fixtures/order-service",
+    "question": "假设有人反馈线上订单查询接口返回了 500，请定位原因。你手头只有这份教学源码，没有线上日志、请求样本或运行环境。请区分源码能确认的事实、无法确定的根因，以及需要补充的材料。"
+  }
+]
