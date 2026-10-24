@@ -17,7 +17,7 @@ from openai import APITimeoutError
 
 from repo_agent.agent import INSTRUCTIONS, build_agent
 from repo_agent.tools import load_sources, source_hash
-from team_harness import model as model_module
+from repo_agent import model as model_module
 
 
 def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None):

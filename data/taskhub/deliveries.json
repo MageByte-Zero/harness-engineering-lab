@@ -1,5 +1,0 @@
-[
-  {"delivery_id":"d-104","project_id":"demo-project","status":"failed","http_status":401,"attempted_at":"2026-10-16T08:00:00Z","service_id":"webhook-delivery","response_summary":"authentication rejected"},
-  {"delivery_id":"d-105","project_id":"demo-project","status":"failed","http_status":429,"attempted_at":"2026-10-16T08:01:00Z","service_id":"webhook-delivery","retry_after_seconds":30,"response_summary":"rate limited"},
-  {"delivery_id":"d-900","project_id":"other-project","status":"succeeded","http_status":200,"attempted_at":"2026-10-16T08:02:00Z","service_id":"webhook-delivery"}
-]

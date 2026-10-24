@@ -1,3 +1,0 @@
-[
-  {"service_id":"webhook-delivery","status":"degraded","observed_at":"2026-10-16T08:03:00Z","summary":"Elevated delivery latency is under investigation; the root cause is not confirmed."}
-]

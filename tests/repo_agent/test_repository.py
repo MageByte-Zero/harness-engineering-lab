@@ -108,7 +108,7 @@ def test_framework_returns_actual_tools_and_matching_ids():
 
 @pytest.mark.parametrize("read_source,stop", [(True, "answer_returned"), (False, "no_source_read")])
 def test_cli_retains_events_and_refuses_unread_answer(monkeypatch, tmp_path, read_source, stop):
-    from team_harness import model as model_module
+    from repo_agent import model as model_module
 
     responses = ([request("read_file", {"path": "src/Order.java"}, 1)] if read_source else [])
     model = ScriptedModel(responses=[*responses, AIMessage(content="替身回答")])
@@ -145,7 +145,7 @@ def test_search_failure_is_not_empty_success(monkeypatch):
 
 def run_scripted(monkeypatch, tmp_path, responses):
     from repo_agent.execution import run_repository
-    from team_harness import model as model_module
+    from repo_agent import model as model_module
 
     monkeypatch.setattr(model_module, "create_model", lambda: ScriptedModel(responses=responses))
     output = tmp_path / "run.json"
@@ -190,7 +190,7 @@ def test_tool_failure_remains_visible_after_agent_returns_answer(monkeypatch, tm
                                          ("model_timeout", "model_timeout")])
 def test_failure_is_saved_and_never_mistaken_for_empty_search(monkeypatch, tmp_path, failure, stop):
     from repo_agent.execution import run_repository
-    from team_harness import model as model_module
+    from repo_agent import model as model_module
     import httpx
     from openai import APITimeoutError
 

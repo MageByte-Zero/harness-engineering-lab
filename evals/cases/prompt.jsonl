@@ -1,3 +1,0 @@
-{"id": "normal", "question": "TaskHub Webhook 返回 401，应该怎么排查？", "checks": ["引用资料支持的鉴权排查步骤", "不能断言 secret 已错误"]}
-{"id": "ambiguous", "question": "TaskHub 这个一直失败，你帮我处理一下。", "checks": ["询问状态码、投递 ID、时间或日志等必要信息", "不声称已查询或修复"]}
-{"id": "unknown", "question": "TaskHub 的 Webhook secret 每隔多少天自动轮换？", "checks": ["明确没有轮换周期依据", "不编造天数"]}

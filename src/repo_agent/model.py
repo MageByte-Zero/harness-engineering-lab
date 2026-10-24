@@ -1,4 +1,4 @@
-"""Shared Chat Completions configuration; never serialize credentials."""
+"""Model adapter for the repository agent; never serialize credentials."""
 
 import os
 from pathlib import Path

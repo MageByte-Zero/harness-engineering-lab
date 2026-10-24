@@ -1,5 +1,0 @@
-[
-  {"id":"boundary","question":"合成请求 boundary 在 value=100 时被命中，请查日志并运行固定测试，说明已观察到什么、还不能确认什么。","expected_status":"known","required_text":"100","required_tools":["read_logs","run_tests"]},
-  {"id":"normal","question":"合成请求 normal 的 value=101 是否符合 (100,500]，并检查四个边界测试是否通过。","expected_status":"known","required_text":"101","required_tools":["read_logs","run_tests"]},
-  {"id":"missing","question":"合成请求 missing 为什么被命中？请给有证据的判断，证据不足就说明缺什么。","expected_status":"unknown","required_text":"","required_tools":["read_logs"]}
-]
