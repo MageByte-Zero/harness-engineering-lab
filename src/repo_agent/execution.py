@@ -32,7 +32,7 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
         raise ValueError("Question must not be empty")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     record = {"run_id": str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
-              "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1",
+              "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1", "tool_contract_version": 2,
               "question": question, "task_id": task_id, "instructions": INSTRUCTIONS, "events": [],
               "answer": None, "stop_reason": None, "error": None, "review": None, "tool_issues": [],
               "python": platform.python_version(),

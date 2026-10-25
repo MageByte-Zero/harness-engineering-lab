@@ -4,7 +4,7 @@
 
 ## 唯一应用：企业研发 Agent（当前为只读核心）
 
-第 4–5 讲当前实现对应 `2026-10-25-openai-agents-sdk`。课程当前规划继续扩展为理解、设计、受控开发与测试；现有源码仍是只读核心：复用 OpenAI Agents SDK 的 `Agent` 和 `Runner`，在固定源码快照内搜索、读取并解释订单查询功能。
+第 4–6 讲当前实现对应 `2026-10-25-openai-agents-sdk`。课程当前规划继续扩展为理解、设计、受控开发与测试；现有源码仍是只读核心：复用 OpenAI Agents SDK 的 `Agent` 和 `Runner`，在固定源码快照内列举路径、搜索、读取并解释订单查询功能。
 
 **应用源码在 `src/repo_agent/`，运行入口在 [examples/repo_reading](examples/repo_reading/README.md)。** 后续讲次继续扩展这一应用，不复制成新的项目目录。
 
@@ -13,7 +13,7 @@ harness-engineering-lab/
 ├── src/repo_agent/          # 唯一应用包
 │   ├── agent.py            # 任务指令、工具与框架循环的组装
 │   ├── execution.py        # 一次运行的生命周期、预算结果与事件留存
-│   ├── tools.py            # 有界源码快照、搜索与读取
+│   ├── tools.py            # 有界源码快照、路径清单、搜索与读取
 │   ├── model.py            # 模型客户端与 MODEL_* 配置
 │   └── checks.py           # 离线记录核对，不承担答案语义验收
 ├── examples/repo_reading/   # 薄 CLI、固定任务与独立人工参考
@@ -26,6 +26,8 @@ harness-engineering-lab/
 第 4–5 讲 SDK 版固定入口为 `lesson-04-sdk-20261025` 与 `lesson-05-sdk-20261025`；两讲共用同一代码版本。完整命令、限制和独立参考见上述运行说明。69d2233 对应迁移前的 LangChain 原始运行，历史标签和证据保持原义。
 
 第 5 讲沿用同一个 Agent，增加四条固定任务、停止原因分类和离线记录检查；入口 `examples/repo_reading/05_tasks.py`，判定参考与源码输入分开。运行与复现命令见同目录 README；尚未发布 `lesson-05-v2` 标签。
+
+第 6 讲固定入口为 `lesson-06-tools-20261025`，沿同一应用完善工具契约：`list_source_files` 只列绑定快照的路径，所有工具结果带 `scope: snapshot_only` 和 `snapshot_id`；读取另给出字符截断与行段续读信息。离线检查支持这些字段及旧版记录。复现步骤与比较边界见[第6讲说明](examples/repo_reading/README.md#第-6-讲工具契约与快照路径)。
 
 ## 获取与运行
 

@@ -39,7 +39,7 @@ def test_snapshot_excludes_secrets_links_and_freezes_content(tmp_path):
     (root / "linked").symlink_to(tmp_path, target_is_directory=True)
     sources = load_sources(root)
     assert sources == {"Real.java": "class Real {}\n"}
-    search, read = repository_tools(sources)
+    search, read, *_ = repository_tools(sources)
     (root / "Real.java").write_text("CHANGED")
     sources["Real.java"] = "MUTATED"
     assert "class Real" in invoke(read, {"path": "Real.java"})["content"]
@@ -49,12 +49,12 @@ def test_snapshot_excludes_secrets_links_and_freezes_content(tmp_path):
 
 @pytest.mark.parametrize("path", ["../outside.java", "/etc/passwd", ".env", "src/../../secret", "..\\secret"])
 def test_path_escape_is_denied(path):
-    _, read = repository_tools(load_sources(FIXTURE))
-    assert invoke(read, {"path": path}) == {"status": "denied"}
+    _, read, *_ = repository_tools(load_sources(FIXTURE))
+    assert invoke(read, {"path": path})["status"] == "denied"
 
 
 def test_real_read_search_and_missing_are_distinct():
-    search, read = repository_tools(load_sources(FIXTURE))
+    search, read, *_ = repository_tools(load_sources(FIXTURE))
     result = invoke(read, {"path": "src/OrderController.java", "start_line": 17, "end_line": 20})
     assert result["status"] == "ok" and '17:     @GetMapping("/{id}")' in result["content"]
     assert result["truncated"] is True
@@ -69,7 +69,7 @@ def test_real_read_search_and_missing_are_distinct():
 
 
 def test_literal_search_and_output_bound():
-    search, _ = repository_tools({"a.java": "\n".join([".* --help"] * 25)})
+    search, *_ = repository_tools({"a.java": "\n".join([".* --help"] * 25)})
     result = invoke(search, {"keyword": ".*"})
     assert len(result["matches"]) == 20 and result["truncated"]
     assert invoke(search, {"keyword": "--help"})["status"] == "ok"
@@ -167,8 +167,10 @@ def test_model_limit_stops_instead_of_looping():
 
 def test_search_failure_is_not_empty_success(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 2, "", "private error"))
-    search, _ = repository_tools({"a.java": "class A {}"})
-    assert invoke(search, {"keyword": "class"}) == {"status": "unavailable", "matches": [], "reason": "search_failed"}
+    search, *_ = repository_tools({"a.java": "class A {}"})
+    result = invoke(search, {"keyword": "class"})
+    assert result["status"] == "unavailable" and result["matches"] == []
+    assert result["reason"] == "search_failed" and result["scope"] == "snapshot_only"
 
 
 def run_scripted(monkeypatch, tmp_path, responses):
@@ -300,3 +302,84 @@ def test_malformed_call_retains_entire_received_batch_before_stopping(monkeypatc
     report = check_record(record)
     assert report["ok"] and report["observed_tool_results"] == 0
     assert record["stop_reason"] == "model_error" and record["answer"] is None
+
+
+def test_file_list_reports_only_frozen_admitted_paths_not_disk_inventory(tmp_path):
+    (tmp_path / 'Order.java').write_text('class Order {}\n')
+    (tmp_path / 'pom.xml').write_text('<project/>\n')
+    sources = load_sources(tmp_path)
+    tools = {tool.name: tool for tool in repository_tools(sources)}
+    assert 'list_source_files' in tools
+    (tmp_path / 'Later.java').write_text('class Later {}\n')
+    result = invoke(tools['list_source_files'], {})
+    assert result['files'] == [{'path': 'Order.java', 'sha256':
+        'dc6a63cd5a056b1bc852e5cd1e608fb320746919af583bb89a243bf8e96b0a03'}]
+    assert result['scope'] == 'snapshot_only' and result['repository_complete'] is False
+    assert result['truncated'] is False and '.xml' not in result['supported_suffixes']
+    absent = invoke(tools['read_file'], {'path': 'pom.xml'})
+    empty = invoke(tools['search_code'], {'keyword': 'pom.xml'})
+    assert absent['status'] == 'not_found' and empty['matches'] == []
+    assert absent['scope'] == empty['scope'] == 'snapshot_only'
+    assert absent['snapshot_id'] == empty['snapshot_id'] == result['snapshot_id']
+
+
+def test_snapshot_identity_changes_with_content_and_ignores_insertion_order():
+    def identity(sources):
+        tool = repository_tools(sources)[0]
+        return invoke(tool, {'keyword': 'class'})['snapshot_id']
+    first = identity({'a.java': 'class A {}', 'b.java': 'class B {}'})
+    assert first == identity({'b.java': 'class B {}', 'a.java': 'class A {}'})
+    assert first != identity({'a.java': 'class Changed {}', 'b.java': 'class B {}'})
+
+
+def test_line_continuation_and_character_cut_have_different_followups():
+    read = repository_tools({'a.java': '\n'.join(['line'] * 130), 'wide.java': 'x' * 13000})[1]
+    first = invoke(read, {'path': 'a.java'})
+    assert first['next_start_line'] == 121 and not first['content_truncated']
+    rest = invoke(read, {'path': 'a.java', 'start_line': first['next_start_line'], 'end_line': 130})
+    assert rest['content'].startswith('121: line') and rest['next_start_line'] is None
+    assert rest['truncated'] is False
+    wide = invoke(read, {'path': 'wide.java'})
+    assert len(wide['content']) == 12000 and wide['content_truncated']
+    assert wide['truncated'] and wide['next_start_line'] is None
+    assert invoke(read, {'path': ''})['status'] == 'invalid_path'
+
+
+def test_new_list_observations_and_scope_are_checked_against_retained_snapshot(monkeypatch, tmp_path):
+    from repo_agent.checks import check_record
+    import copy
+    record = run_scripted(monkeypatch, tmp_path, [
+        request('list_source_files', {}, 1),
+        request('read_file', {'path': 'src/Order.java'}, 2),
+        answer('订单字段可见；快照不等于仓库全部文件'),
+    ])
+    assert record['stop_reason'] == 'answer_returned'
+    assert check_record(record)['ok']
+    tool_message = next(m for e in record['events'] for m in e['state']['messages']
+                        if m['type'] == 'tool' and m['name'] == 'list_source_files')
+    original = json.loads(tool_message['content'])
+    for field, value, expected in [
+        ('files', original['files'] + [{'path': 'invented.java', 'sha256': '0' * 64}], 'list_observation'),
+        ('files', original['files'][:-1], 'list_observation'),
+        ('snapshot_id', '0' * 64, 'snapshot_identity'),
+        ('scope', 'whole_repository', 'tool_scope'),
+    ]:
+        changed = copy.deepcopy(original)
+        changed[field] = value
+        tool_message['content'] = json.dumps(changed)
+        assert expected in check_record(record)['errors']
+    tool_message['content'] = json.dumps(original)
+    assert check_record(record)['ok']
+
+
+def test_read_continuation_cannot_invent_remaining_lines(monkeypatch, tmp_path):
+    from repo_agent.checks import check_record
+    record = run_scripted(monkeypatch, tmp_path, [
+        request('read_file', {'path': 'src/Order.java'}, 1), answer('已读取订单字段'),
+    ])
+    assert check_record(record)['ok']
+    message = next(m for e in record['events'] for m in e['state']['messages'] if m['type'] == 'tool')
+    result = json.loads(message['content'])
+    result['total_lines'] = 999
+    message['content'] = json.dumps(result)
+    assert 'read_continuation' in check_record(record)['errors']

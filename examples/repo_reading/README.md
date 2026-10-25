@@ -1,4 +1,4 @@
-# 第 4–5 讲：仓库阅读 Agent
+# 第 4–6 讲：仓库阅读 Agent
 
 对应课程修订 `2026-10-25-openai-agents-sdk`，使用 OpenAI Agents SDK 0.24.0。本目录是唯一课程运行入口，共用 `src/repo_agent/` 的应用源码；第 4、5 讲共用同一实现，固定版本入口由下方标签和文章给出。读者按文章给出的固定 commit 获取同一份源码。旧示例已从当前工作区移除，历史标签与查看方式见[仓库说明](../../README.md#历史版本与仓库边界)。
 
@@ -77,3 +77,36 @@ uv run --frozen python -m pytest tests/repo_agent -q
 `Agent` 绑定指令、模型与 `function_tool`；`Runner` 派发工具、回填观察并继续调用模型。应用保留快照范围、工具总预算、输出预占、停止分类和独立参考。使用 `RunHooks` 观察模型与工具完成事件，不手写模型/工具循环。当前不消费 token 流，Web/SSE 在后续讲次接入。
 
 本例使用 SDK 的 `OpenAIChatCompletionsModel` 连接现有兼容资源，不代表任意兼容服务支持 SDK 全部功能。当前 `RunConfig(tracing_disabled=True)` 关闭远端 tracing，运行证据仅写本地 JSON；后续追踪接入需另行配置和验证。旧 LangChain 版本与输出从历史固定提交获取，不与 SDK 版混用。
+
+## 第 6 讲：工具契约与快照路径
+
+第4–5讲固定版本保持原义。当前工具在同一应用中演进为三种分工：
+
+| 工具 | 能回答的问题 | 结果不能支持的判断 |
+| --- | --- | --- |
+| `list_source_files()` | 快照收录了哪些路径和文件版本 | 完整磁盘目录、仓库不存在某文件 |
+| `search_code(keyword)` | 已收录文件的内容在哪里包含字面关键词 | 文件名是否存在、未匹配概念一定不存在 |
+| `read_file(path, start_line, end_line)` | 快照内某路径、某行段的内容 | 运行过服务、验证过HTTP响应 |
+
+每个结果的 `scope` 是 `snapshot_only`，`snapshot_id` 绑定排序后的路径/文件哈希清单；它标识这次输入，不是外部仓库的Git提交，也不能证明结果可信或安全。快照装载规则不变，尤其 `.xml/.yml/.properties` 未被收录；工具没有让模型指定磁盘根目录。列表无参数且完整列出受100文件上限约束的快照，明确 `repository_complete: false`。模型凭实际任务选择工具，不强制先列目录。
+
+搜索成功但没有命中是 `status: ok, matches: []`；已知搜索服务失败是 `unavailable`。空白/过长/多行关键词是 `invalid_keyword`；空路径是 `invalid_path`；快照未收录路径是 `not_found`；越界路径是 `denied`；不合法行段是 `invalid_range`。Schema/Pydantic先检查行号类型与大于等于1，函数再检查起止和范围。`failure_error_function=None` 使未处理异常停止并由应用留存，未伪装成空成功；搜索超时和未知故障的既有停止分类保留。
+
+`read_file` 仍最多120行/12000字符。`truncated` 表示返回内容并未覆盖到文件末尾，`content_truncated` 专指本次行段被字符上限截断。`next_start_line` 非空时，下一次同时设置 `start_line=next_start_line`、`end_line=min(start_line+119,total_lines)`；不要只改start而保留默认end=120。字符截断时该字段为null，先缩小行段；如果单行已经超限，本工具不能完整返回该行，须报告缺口而不是跳过剩余字符。
+
+新记录声明 `tool_contract_version: 2`。离线检查核对每个结果的范围与快照标识、完整路径清单及读取续接字段，并继续核对旧版无这些字段的记录。它仍不判答案语义。真实比较同时修改了工具能力、描述、结果及有关指令，不能把变化单独归因于名称或某句话。
+
+使用现有任务入口复现本讲重点任务，每条两次，文件名须未被使用：
+
+```bash
+uv sync --frozen
+uv run --frozen python -m pytest -q
+for task in data-source missing-mapping; do
+  for trial in 01 02; do
+    uv run --frozen python examples/repo_reading/05_tasks.py --task "$task" --output "runs/repo-reading-06/${task}-${trial}.json"
+  done
+done
+uv run --frozen python examples/repo_reading/05_check.py runs/repo-reading-06/data-source-01.json
+```
+
+与旧版比较时先在第5讲固定版本执行并写入另一个输出目录，再取得第6讲固定版本执行同组命令；保持输入、问题、MODEL_*与预算相同。不要在脏工作区切换版本，不覆盖已有结果。兼容资源的配置名不保证底层模型身份固定；少量任务不能证明质量普遍提升。逐项核对Map数据来源、缺映射时状态/响应体未知，以及回答有没有越过快照范围；路径列表调用成功本身不算答案通过。独立参考继续使用 `05_reference.md`，不发送给模型。

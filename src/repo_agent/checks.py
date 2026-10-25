@@ -1,8 +1,9 @@
 """Check retained observations against their snapshot; semantic review stays pending."""
 
 import json
+from pathlib import PurePosixPath
 
-from repo_agent.tools import source_hash
+from repo_agent.tools import SOURCE_SUFFIXES, snapshot_hash, source_hash
 
 
 def check_record(record):
@@ -13,6 +14,7 @@ def check_record(record):
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
             errors.append("snapshot_hash")
+        snapshot_id = snapshot_hash({path: source["content"] for path, source in sources.items()})
         for event in record["events"]:
             for message in (event["state"] or {}).get("messages", []):
                 if message["type"] == "ai":
@@ -32,6 +34,11 @@ def check_record(record):
                         continue
                     results.add(call_id)
                     result = json.loads(message["content"])
+                    if record.get("tool_contract_version") == 2 or "snapshot_id" in result:
+                        if result.get("snapshot_id") != snapshot_id:
+                            errors.append("snapshot_identity")
+                        if result.get("scope") != "snapshot_only":
+                            errors.append("tool_scope")
                     if result["status"] != "ok":
                         continue
                     if message["name"] == "read_file":
@@ -41,8 +48,16 @@ def check_record(record):
                         expected = "\n".join(f"{i + 1}: {lines[i]}" for i in range(start - 1, end))[:12_000]
                         if (not 1 <= start <= end <= len(lines) or result["content"] != expected
                                 or result["sha256"] != source["sha256"]
-                                or result["path"] != call["args"]["path"]):
+                                or result["path"] != PurePosixPath(call["args"]["path"]).as_posix()):
                             errors.append("read_observation")
+                        if record.get("tool_contract_version") == 2:
+                            full = "\n".join(f"{i + 1}: {lines[i]}" for i in range(start - 1, end))
+                            cut = len(full) > 12_000
+                            next_line = end + 1 if end < len(lines) and not cut else None
+                            if (result["total_lines"] != len(lines) or result["content_truncated"] != cut
+                                    or result["next_start_line"] != next_line
+                                    or result["truncated"] != (end < len(lines) or cut)):
+                                errors.append("read_continuation")
                         reads += 1
                     elif message["name"] == "search_code":
                         for match in result["matches"]:
@@ -51,6 +66,13 @@ def check_record(record):
                             if (match["text"] != line[:500] or match["sha256"] != source["sha256"]
                                     or call["args"]["keyword"] not in line):
                                 errors.append("search_observation")
+                    elif message["name"] == "list_source_files":
+                        expected_files = [{"path": path, "sha256": sources[path]["sha256"]}
+                                          for path in sorted(sources)]
+                        if (result["files"] != expected_files or result["truncated"] is not False
+                                or result["repository_complete"] is not False
+                                or result["supported_suffixes"] != sorted(SOURCE_SUFFIXES)):
+                            errors.append("list_observation")
         if not record.get("finished_at") or not record.get("stop_reason"):
             errors.append("unfinished_record")
         if record["stop_reason"] == "answer_returned":
