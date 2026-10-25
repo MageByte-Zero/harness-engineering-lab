@@ -6,6 +6,16 @@
 
 在仓库根目录运行，需要 Python 3.12、uv 与 ripgrep（`rg --version`）。模型资源必须支持 Chat Completions 工具调用。根目录 `.env` 使用现有 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`，参考 `.env.example`；不把密钥写进命令、源码或结果文件。
 
+根目录指包含 `pyproject.toml` 的 `harness-engineering-lab/`，不是 `examples/repo_reading/`。克隆只得到空值模板 `.env.example`，程序不会自动读取模板。首次在根目录执行下面命令创建实际配置文件，已有文件不会被覆盖：
+
+```bash
+cp -n .env.example .env
+```
+
+用编辑器填写 `.env` 的三个值：`MODEL_API_KEY` 是模型服务的API密钥，`MODEL_BASE_URL` 是服务提供的API基地址，`MODEL_NAME` 是该服务的实际模型ID。它们来自同一模型服务控制台或企业网关管理员，不是网页登录地址或模型的展示名称。
+
+`src/repo_agent/model.py` 加载当前执行目录的 `.env`，已有同名进程环境变量优先。点开头的文件可用 `ls -a` 查看；真实配置留在被Git忽略的 `.env`，公开 `.env.example` 只保留空值。不要输出密钥来排查配置。
+
 ```bash
 uv sync --frozen
 uv run --frozen python examples/repo_reading/04_agent.py --help

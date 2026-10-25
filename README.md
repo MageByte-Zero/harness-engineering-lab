@@ -21,7 +21,7 @@ harness-engineering-lab/
 └── tests/repo_agent/        # 当前应用的边界与框架回归测试
 ```
 
-`fixtures/order-service` 与 `fixtures/order-service-missing` 是不同验收输入，需要同时保留。`runs/` 是运行时生成的本地记录，不提交 Git。模型配置沿用根目录 `.env.example`。
+`fixtures/order-service` 与 `fixtures/order-service-missing` 是不同验收输入，需要同时保留。`runs/` 是运行时生成的本地记录，不提交 Git。模型配置填写在根目录 `.env`；`.env.example` 仅为公开空值模板，程序不会自动读取它。
 
 第 4–5 讲 SDK 版固定入口为 `lesson-04-sdk-20261025` 与 `lesson-05-sdk-20261025`；两讲共用同一代码版本。完整命令、限制和独立参考见上述运行说明。69d2233 对应迁移前的 LangChain 原始运行，历史标签和证据保持原义。
 
@@ -37,7 +37,7 @@ cd harness-engineering-lab
 uv sync --frozen
 ```
 
-使用 Python 3.12、uv 和 ripgrep。根目录 `.env.example` 提供 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME` 的配置位置；已有 `.env` 不要覆盖。完整运行、四条任务及判定说明见 [仓库阅读 Agent](examples/repo_reading/README.md)。
+使用 Python 3.12、uv 和 ripgrep。在上述仓库根目录执行 `cp -n .env.example .env`，然后用编辑器填写 `.env` 的 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`；已有 `.env` 不要覆盖。三个值来自模型服务控制台或企业网关管理员。真实Key不提交，完整配置步骤、四条任务及判定说明见 [仓库阅读 Agent](examples/repo_reading/README.md#准备)。
 
 ## 后续架构与分包约定
 
