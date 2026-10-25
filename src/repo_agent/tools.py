@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 from typing import Annotated
 
-from langchain.tools import tool
+from agents import function_tool
 from pydantic import Field
 
 SOURCE_SUFFIXES = {".java", ".go", ".py", ".sql", ".md"}
@@ -45,7 +45,7 @@ def source_hash(content: str) -> str:
 def repository_tools(sources: dict[str, str]):
     sources = sources.copy()
 
-    @tool
+    @function_tool(failure_error_function=None)
     def search_code(keyword: str) -> dict:
         """在绑定的源码快照中做字面关键词搜索，返回路径、行号和片段。无匹配就换线索；需要完整逻辑时用 read_file。"""
         if not keyword.strip() or len(keyword) > 200 or "\n" in keyword or "\r" in keyword:
@@ -66,7 +66,7 @@ def repository_tools(sources: dict[str, str]):
                     return {"status": "ok", "matches": matches[:20], "truncated": True}
         return {"status": "ok", "matches": matches, "truncated": False}
 
-    @tool
+    @function_tool(failure_error_function=None)
     def read_file(path: str, start_line: Annotated[int, Field(ge=1)] = 1,
                   end_line: Annotated[int, Field(ge=1)] = 120) -> dict:
         """读取绑定快照中的相对路径，返回带行号的源码。每次最多120行；不存在、禁止与成功是不同结果。"""

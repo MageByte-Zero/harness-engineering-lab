@@ -4,7 +4,7 @@
 
 ## 唯一应用：企业研发 Agent（当前为只读核心）
 
-第 4–5 讲已有实现对应 `2026-10-19-systematic-agent`。课程当前规划继续扩展为理解、设计、受控开发与测试；现有源码仍是只读核心：复用 LangChain `create_agent`，在固定源码快照内搜索、读取并解释订单查询功能。
+第 4–5 讲当前实现对应 `2026-10-25-openai-agents-sdk`。课程当前规划继续扩展为理解、设计、受控开发与测试；现有源码仍是只读核心：复用 OpenAI Agents SDK 的 `Agent` 和 `Runner`，在固定源码快照内搜索、读取并解释订单查询功能。
 
 **应用源码在 `src/repo_agent/`，运行入口在 [examples/repo_reading](examples/repo_reading/README.md)。** 后续讲次继续扩展这一应用，不复制成新的项目目录。
 
@@ -23,7 +23,7 @@ harness-engineering-lab/
 
 `fixtures/order-service` 与 `fixtures/order-service-missing` 是不同验收输入，需要同时保留。`runs/` 是运行时生成的本地记录，不提交 Git。模型配置沿用根目录 `.env.example`。
 
-第 4–5 讲原始运行记录对应下方 69d2233 固定快照；当前版本已收敛目录与规范，尚未发布 `lesson-04-v2` 标签；完整命令、限制和人工参考见上述运行说明。历史代码和标签保留，不视为新课程的前置验收。
+第 4–5 讲 SDK 版固定入口为 `lesson-04-sdk-20261025` 与 `lesson-05-sdk-20261025`；两讲共用同一代码版本。完整命令、限制和独立参考见上述运行说明。69d2233 对应迁移前的 LangChain 原始运行，历史标签和证据保持原义。
 
 第 5 讲沿用同一个 Agent，增加四条固定任务、停止原因分类和离线记录检查；入口 `examples/repo_reading/05_tasks.py`，判定参考与源码输入分开。运行与复现命令见同目录 README；尚未发布 `lesson-05-v2` 标签。
 
@@ -59,10 +59,10 @@ CLI/API 复用同一应用用例；运行时产生可关联的事件供入口展
 
 ## 主底座与 SDK 选型边界
 
-主线已确定采用 OpenAI Agents SDK（Python）。当前源码仍是已验证的 LangChain 只读历史基线，SDK 迁移尚未实施；下一步在同一 src/repo_agent 迁移现有最小案例和运行控制，真实验收后只保留 SDK 活动实现。旧源码与输出从固定 Git 版本获取，不复制新工程，不再进行多框架候选比赛。
+主线采用 OpenAI Agents SDK（Python），当前 repo_agent 已迁移到 Agent / Runner / function_tool / RunHooks，锁定 openai-agents 0.24.0。第 4–5 讲在同一实现中提供只读工具、模型轮次与工具总预算、停止分类和离线检查。LangChain 旧源码及运行记录从历史固定版本获取，不在活动源码中并行维护。
 
 [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk)用于构建自己的 Agent/Harness；[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)用于复用成熟 Codex 研发执行；App Server 是更底层的集成接口。后续状态、审批和恢复复用 OpenAI Agents SDK 原生机制，企业授权、Task/Run、隔离与接受条件由应用实现。不引入 LangGraph/Deep Agents 作为主线运行时。
 
-资料获取从直接读取、按需搜索和现有系统查询开始，向量/混合索引由实际漏检和成本决定，不强制增加向量数据库。SDK 和索引组件在真实验证后才加入锁文件，当前运行与 fixture 不因规划改变。
+资料获取从直接读取、按需搜索和现有系统查询开始，向量/混合索引由实际漏检和成本决定，不强制增加向量数据库。SDK 已按实际验证写入锁文件；新增索引组件仍须有对应任务与验证，不能因为规划而增加依赖。
 
-SDK 用于复用循环、工具派发、流式事件、会话/运行状态、审批和追踪等机制。实现仍需提供业务工具、身份/数据范围、持久化配置、隔离执行和任务评测。当前只记录架构决定，不声称 SDK 依赖、迁移或真实运行已经完成。
+SDK 用于复用循环、工具派发、流式事件、会话/运行状态、审批和追踪等机制。实现仍需提供业务工具、身份/数据范围、持久化配置、隔离执行和任务评测。模型/工具边界回归与真实任务分别验收，任务结束不自动等于答案正确；后续会话、审批、MCP、Web 与执行隔离尚待对应讲次实现。

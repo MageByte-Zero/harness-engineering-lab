@@ -1,7 +1,6 @@
 """Application instructions and tools, composed with the framework's loop."""
 
-from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+from agents import Agent
 
 from repo_agent.tools import repository_tools
 
@@ -15,12 +14,9 @@ INSTRUCTIONS = """你是只读代码库助手，用中文解释指定源码快�
 
 
 def build_agent(model, sources: dict[str, str]):
-    return create_agent(
+    return Agent(
+        name="Repository reader",
         model=model,
         tools=repository_tools(sources),
-        system_prompt=INSTRUCTIONS,
-        middleware=[
-            ModelCallLimitMiddleware(run_limit=12, exit_behavior="error"),
-            ToolCallLimitMiddleware(run_limit=16, exit_behavior="error"),
-        ],
+        instructions=INSTRUCTIONS,
     )
