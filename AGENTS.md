@@ -50,8 +50,10 @@
 
 ## 主底座与 SDK 选型边界
 
-当前已用 LangChain create_agent；尚未接入 OpenAI Agents SDK、Deep Agents、Codex SDK 或 Claude Agent SDK。正式扩展前，用当前固定任务验证 OpenAI Agents SDK 与现有实现的工具、资源兼容、事件、状态、审批和取消，确定一种后续主底座；不在同一应用里并行维护框架副本。Deep Agents 的预组装能力在需要时验证。
+主线已确定采用 OpenAI Agents SDK（Python）。当前源码仍是已验证的 LangChain 只读历史基线，SDK 迁移尚未实施；下一步在同一 src/repo_agent 迁移现有最小案例和运行控制，真实验收后只保留 SDK 活动实现。旧源码与输出从固定 Git 版本获取，不复制新工程，不再进行多框架候选比赛。
 
-[OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk)用于构建自己的 Agent/Harness；[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)用于复用成熟 Codex 研发执行；App Server 是更底层的集成接口。状态、审批和恢复的机制按实际采用的底座解释，不套用另一框架接口。
+[OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk)用于构建自己的 Agent/Harness；[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)用于复用成熟 Codex 研发执行；App Server 是更底层的集成接口。后续状态、审批和恢复复用 OpenAI Agents SDK 原生机制，企业授权、Task/Run、隔离与接受条件由应用实现。不引入 LangGraph/Deep Agents 作为主线运行时。
 
 资料获取从直接读取、按需搜索和现有系统查询开始，向量/混合索引由实际漏检和成本决定，不强制增加向量数据库。SDK 和索引组件在真实验证后才加入锁文件，当前运行与 fixture 不因规划改变。
+
+SDK 用于复用循环、工具派发、流式事件、会话/运行状态、审批和追踪等机制。实现仍需提供业务工具、身份/数据范围、持久化配置、隔离执行和任务评测。当前只记录架构决定，不声称 SDK 依赖、迁移或真实运行已经完成。
