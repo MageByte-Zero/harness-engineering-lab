@@ -95,9 +95,11 @@ class ScriptedModel(Model):
     def __init__(self, responses):
         self.responses = iter(responses)
         self.inputs = []
+        self.instructions = []
 
     async def get_response(self, system_instructions, input, *args, **kwargs):
         self.inputs.append(input)
+        self.instructions.append(system_instructions)
         item = next(self.responses)
         return ModelResponse(output=item if isinstance(item, list) else [item],
                              usage=Usage(requests=1), response_id=None)
@@ -131,6 +133,38 @@ def test_framework_returns_actual_tools_and_matching_ids():
     assert model.inputs[-1] == result.to_input_list()[:-1]
     assert "service.find(id)" in str(tools[1]["output"])
     assert result.final_output == "测试替身回答，不代表语义验收"
+
+
+@pytest.mark.parametrize("note", ["", "缺少线上证据时，指出需要补充的请求样本。"])
+def test_instruction_note_reaches_model_and_saved_record(monkeypatch, tmp_path, note):
+    from repo_agent import model as model_module
+    from repo_agent.agent import INSTRUCTIONS
+
+    model = ScriptedModel([
+        request("read_file", {"path": "src/OrderRepository.java"}, 1), answer("替身回答"),
+    ])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+    output = tmp_path / "run.json"
+    monkeypatch.setattr(sys, "argv", ["05_tasks.py", "--task", "data-source", "--output", str(output),
+                                      "--instruction-note", note])
+    runpy.run_path("examples/repo_reading/05_tasks.py", run_name="__main__")
+    expected = INSTRUCTIONS + ("\n" + note if note else "")
+    record = json.loads(output.read_text())
+    assert model.instructions == [expected, expected]
+    assert record["instructions"] == expected
+    if note:
+        assert note not in record["question"]
+    assert record["stop_reason"] == "answer_returned"
+
+
+@pytest.mark.parametrize("instructions", ["", " \n\t"])
+def test_empty_instructions_are_rejected_before_output(tmp_path, instructions):
+    from repo_agent.execution import run_repository
+
+    output = tmp_path / "unused" / "run.json"
+    with pytest.raises(ValueError, match="Instructions must not be empty"):
+        run_repository(FIXTURE, "检查订单", output, instructions=instructions)
+    assert not output.parent.exists()
 
 
 @pytest.mark.parametrize("read_source,stop", [(True, "answer_returned"), (False, "no_source_read")])

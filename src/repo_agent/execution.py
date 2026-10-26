@@ -27,13 +27,15 @@ class ToolBudgetExceeded(RuntimeError):
     """The observed batch would exceed this application's tool-request budget."""
 
 
-def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None):
+def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None, instructions: str = INSTRUCTIONS):
     if not question.strip():
         raise ValueError("Question must not be empty")
+    if not instructions.strip():
+        raise ValueError("Instructions must not be empty")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     record = {"run_id": str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
               "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1", "tool_contract_version": 2,
-              "question": question, "task_id": task_id, "instructions": INSTRUCTIONS, "events": [],
+              "question": question, "task_id": task_id, "instructions": instructions, "events": [],
               "answer": None, "stop_reason": None, "error": None, "review": None, "tool_issues": [],
               "python": platform.python_version(),
               "versions": {p: version(p) for p in ("openai-agents", "openai", "pydantic")}}
@@ -106,7 +108,7 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
                 "model_limit": MODEL_LIMIT, "tool_limit": TOOL_LIMIT, "remote_tracing": False}
             hooks = ObservationHooks()
             save()
-            result = Runner.run_sync(build_agent(model, sources), question,
+            result = Runner.run_sync(build_agent(model, sources, instructions=instructions), question,
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
             record["answer"] = result.final_output
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed

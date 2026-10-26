@@ -120,3 +120,25 @@ uv run --frozen python examples/repo_reading/05_check.py runs/repo-reading-06/da
 ```
 
 与旧版比较时先在第5讲固定版本执行并写入另一个输出目录，再取得第6讲固定版本执行同组命令；保持输入、问题、MODEL_*与预算相同。不要在脏工作区切换版本，不覆盖已有结果。兼容资源的配置名不保证底层模型身份固定；少量任务不能证明质量普遍提升。逐项核对Map数据来源、缺映射时状态/响应体未知，以及回答有没有越过快照范围；路径列表调用成功本身不算答案通过。独立参考继续使用 `05_reference.md`，不发送给模型。
+
+## 指令对照
+
+`05_tasks.py` 可用 `--instruction-note` 在既有应用指令后追加一段要求；不传时保持原行为。实际完整指令保存在每份记录的 `instructions` 字段，任务问题和工具不变。这个参数由运行程序的人配置，不是允许最终用户扩大权限的入口。
+
+```bash
+note='遇到信息不足的问题，先给出当前材料支持的有限结论，再明确缺少哪份材料、它能验证哪个判断；用户意图含糊时说明你的理解，可先做范围内的只读检查，不把假设当结论。'
+for trial in 01 02; do
+  for task in data-source ambiguous incident; do
+    for variant in baseline guided; do
+      extra=''
+      if [ "$variant" = guided ]; then extra="$note"; fi
+      uv run --frozen python examples/repo_reading/05_tasks.py \
+        --task "$task" --instruction-note "$extra" \
+        --output "runs/repo-reading-07/$variant/$task-$trial.json"
+    done
+  done
+done
+uv run --frozen python examples/repo_reading/05_check.py runs/repo-reading-07/guided/incident-01.json
+```
+
+请使用尚未存在的输出路径，保留报错与预算停止的记录；一次失败后循环仍会继续。更严格的对照可在第二次试次中交换两种指令的先后。先运行离线检查，再按 `05_reference.md` 审读答案，尤其检查含糊任务的检查范围和故障任务的证据缺口。不要只比较排版、调用次数或 `answer_returned`；固定请求配置也不能证明代理底层模型未变。

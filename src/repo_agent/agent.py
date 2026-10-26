@@ -14,10 +14,10 @@ INSTRUCTIONS = """你是只读代码库助手，用中文解释指定源码快�
 最终给出功能解释、关键依据及缺口。"""
 
 
-def build_agent(model, sources: dict[str, str]):
+def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS):
     return Agent(
         name="Repository reader",
         model=model,
         tools=repository_tools(sources),
-        instructions=INSTRUCTIONS,
+        instructions=instructions,
     )
