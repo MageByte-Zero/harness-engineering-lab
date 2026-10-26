@@ -250,6 +250,38 @@ def test_tool_failure_remains_visible_after_agent_returns_answer(monkeypatch, tm
     assert "SECRET" not in json.dumps(record)
 
 
+@pytest.mark.parametrize("plain_context", [True, False])
+def test_unexpected_tool_context_or_result_stops_before_recording_observation(monkeypatch, tmp_path, plain_context):
+    from agents import RunContextWrapper
+    from repo_agent import model as model_module
+    from repo_agent.checks import check_record
+    from repo_agent.execution import run_repository
+
+    model = ScriptedModel([])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+
+    def deliver_unexpected_result(agent, question, *, hooks, **kwargs):
+        call = request("read_file", {"path": "src/Order.java"}, 1)
+        response = ModelResponse(output=[call], usage=Usage(requests=1), response_id=None)
+        asyncio.run(hooks.on_llm_end(None, agent, response))
+        context = (RunContextWrapper(context=None) if plain_context else
+                   ToolContext(context=None, tool_call_id="call-1", tool_name="read_file", tool_arguments=call.arguments))
+        tool = next(t for t in agent.tools if t.name == "read_file")
+        result = {"status": "ok"} if plain_context else "PRIVATE_UNEXPECTED_TOOL_OUTPUT"
+        asyncio.run(hooks.on_tool_end(context, agent, tool, result))
+        raise AssertionError("The unexpected tool contract must stop the run")
+
+    monkeypatch.setattr(Runner, "run_sync", deliver_unexpected_result)
+    path = tmp_path / "unexpected-tool.json"
+    record = run_repository(FIXTURE, "检查订单", path)
+    assert record["stop_reason"] == "tool_error" and record["error"]["type"] == "TypeError"
+    assert record["answer"] is None
+    assert all(m["type"] != "tool" for e in record["events"] for m in e["state"]["messages"])
+    assert "PRIVATE_UNEXPECTED_TOOL_OUTPUT" not in path.read_text()
+    report = check_record(record)
+    assert report["ok"] and report["pending_tool_ids"] == ["call-1"]
+
+
 @pytest.mark.parametrize("failure,stop", [("search_timeout", "tool_timeout"), ("search_error", "tool_error"),
                                          ("model_timeout", "model_timeout")])
 def test_failure_is_saved_and_never_mistaken_for_empty_search(monkeypatch, tmp_path, failure, stop):

@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 from typing import Annotated
 
-from agents import function_tool
+from agents import Tool, function_tool
 from pydantic import Field
 
 SOURCE_SUFFIXES = {".java", ".go", ".py", ".sql", ".md"}
@@ -48,7 +48,7 @@ def snapshot_hash(sources: dict[str, str]) -> str:
     return source_hash(json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
 
 
-def repository_tools(sources: dict[str, str]):
+def repository_tools(sources: dict[str, str]) -> list[Tool]:
     sources = sources.copy()
     snapshot_id = snapshot_hash(sources)
 

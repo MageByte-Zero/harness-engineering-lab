@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from agents import RunConfig, RunHooks, Runner
 from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
+from agents.tool_context import ToolContext
 import httpx
 from openai import APITimeoutError
 
@@ -86,6 +87,8 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
                     raise ToolBudgetExceeded()
 
             async def on_tool_end(self, context, agent, tool, result):
+                if not isinstance(context, ToolContext) or not isinstance(result, dict):
+                    raise TypeError("Repository tools require a tool-call context and a dictionary result")
                 pending.discard(context.tool_call_id)
                 self.read_observed |= tool.name == "read_file" and result.get("status") == "ok"
                 if result.get("status") != "ok":
