@@ -96,10 +96,12 @@ class ScriptedModel(Model):
         self.responses = iter(responses)
         self.inputs = []
         self.instructions = []
+        self.tools = []
 
     async def get_response(self, system_instructions, input, *args, **kwargs):
         self.inputs.append(input)
         self.instructions.append(system_instructions)
+        self.tools.append(kwargs["tools"])
         item = next(self.responses)
         return ModelResponse(output=item if isinstance(item, list) else [item],
                              usage=Usage(requests=1), response_id=None)
@@ -261,6 +263,7 @@ def test_unexpected_tool_context_or_result_stops_before_recording_observation(mo
     monkeypatch.setattr(model_module, "create_model", lambda: model)
 
     def deliver_unexpected_result(agent, question, *, hooks, **kwargs):
+        asyncio.run(hooks.on_llm_start(None, agent, agent.instructions, [{"role": "user", "content": question}]))
         call = request("read_file", {"path": "src/Order.java"}, 1)
         response = ModelResponse(output=[call], usage=Usage(requests=1), response_id=None)
         asyncio.run(hooks.on_llm_end(None, agent, response))
@@ -449,3 +452,152 @@ def test_read_continuation_cannot_invent_remaining_lines(monkeypatch, tmp_path):
     result['total_lines'] = 999
     message['content'] = json.dumps(result)
     assert 'read_continuation' in check_record(record)['errors']
+
+
+def test_context_snapshots_match_model_boundary_and_preserve_observations(monkeypatch, tmp_path):
+    from repo_agent import model as model_module
+    from repo_agent.execution import run_repository
+
+    model = ScriptedModel([request("read_file", {"path": "src/OrderRepository.java"}, 1), answer("已读取")])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+    record = run_repository(FIXTURE, "订单的数据来源？", tmp_path / "context.json")
+    assert record["context_format"] == "sdk-input-v1"
+    assert record["context_char_limit"] == 60000
+    assert len(record["model_inputs"]) == 2
+    for number, snapshot in enumerate(record["model_inputs"]):
+        assert snapshot["call_index"] == number + 1 and snapshot["decision"] == "allowed"
+        assert snapshot["payload"]["input"] == model.inputs[number]
+        assert snapshot["payload"]["instructions"] == model.instructions[number]
+        assert snapshot["payload"]["tools"] == [
+            {"name": t.name, "description": t.description, "parameters": t.params_json_schema,
+             "strict": t.strict_json_schema} for t in model.tools[number]
+        ]
+    first, second = record["model_inputs"]
+    assert first["payload"]["input"] == [{"role": "user", "content": "订单的数据来源？"}]
+    assert second["chars"] > first["chars"]
+    output = next(i for i in second["payload"]["input"] if i.get("type") == "function_call_output")
+    observed = record["events"][1]["state"]["messages"][0]
+    assert output["output"] == str(json.loads(observed["content"]))
+    model.inputs[-1][0]["content"] = "a later mutation"
+    assert first["payload"]["input"][0]["content"] == "订单的数据来源？"
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_invalid_context_budget_leaves_no_output(tmp_path, limit):
+    from repo_agent.execution import run_repository
+
+    output = tmp_path / "unused" / "run.json"
+    with pytest.raises(ValueError, match="Context character limit must be positive"):
+        run_repository(FIXTURE, "检查订单", output, context_char_limit=limit)
+    assert not output.parent.exists()
+
+
+@pytest.mark.parametrize("offset,blocked", [(0, False), (-1, True)])
+def test_context_budget_includes_tools_and_stops_before_model_at_exact_boundary(monkeypatch, tmp_path, offset, blocked):
+    from repo_agent import model as model_module
+    from repo_agent.execution import run_repository
+
+    original = ScriptedModel([answer("unused")])
+    monkeypatch.setattr(model_module, "create_model", lambda: original)
+    first = run_repository(FIXTURE, "检查订单", tmp_path / "size.json")
+    payload = first["model_inputs"][0]["payload"]
+    # Independently calculate the published application format, including tool schemas.
+    exact_size = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    assert first["model_inputs"][0]["chars"] == exact_size
+    model = ScriptedModel([answer("unused")])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+    result = run_repository(FIXTURE, "检查订单", tmp_path / "limited.json", context_char_limit=exact_size + offset)
+    assert len(model.inputs) == (0 if blocked else 1)
+    assert result["model_inputs"][0]["decision"] == ("blocked" if blocked else "allowed")
+    assert result["stop_reason"] == ("context_budget_exhausted" if blocked else "no_source_read")
+    assert result["answer"] is None if blocked else result["answer"] == "unused"
+
+
+def test_later_context_overflow_keeps_tool_result_and_avoids_second_request(monkeypatch, tmp_path):
+    from repo_agent import model as model_module
+    from repo_agent.execution import run_repository
+    from repo_agent.checks import check_record
+
+    model = ScriptedModel([request("read_file", {"path": "src/OrderRepository.java"}, 1)])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+    record = run_repository(FIXTURE, "检查订单", tmp_path / "limited.json", context_char_limit=2200)
+    assert record["stop_reason"] == "context_budget_exhausted"
+    assert len(model.inputs) == 1 and record["answer"] is None
+    assert [s["decision"] for s in record["model_inputs"]] == ["allowed", "blocked"]
+    blocked = record["model_inputs"][-1]
+    assert "Map" in json.dumps(blocked["payload"]["input"])
+    report = check_record(record)
+    assert report["ok"] and report["observed_tool_results"] == 1
+    assert report["blocked_model_inputs"] == 1
+
+
+@pytest.mark.parametrize("entry,args", [("04_agent.py", ["--repo", str(FIXTURE)]),
+                                        ("05_tasks.py", ["--task", "data-source"])])
+def test_context_budget_cli_is_forwarded_before_paid_calls(monkeypatch, tmp_path, entry, args):
+    from repo_agent import model as model_module
+
+    model = ScriptedModel([])
+    monkeypatch.setattr(model_module, "create_model", lambda: model)
+    output = tmp_path / "cli.json"
+    monkeypatch.setattr(sys, "argv", [entry, *args, "--output", str(output), "--context-char-limit", "1"])
+    with pytest.raises(SystemExit) as stopped:
+        runpy.run_path(f"examples/repo_reading/{entry}", run_name="__main__")
+    assert stopped.value.code == 1
+    record = json.loads(output.read_text())
+    assert record["stop_reason"] == "context_budget_exhausted" and not model.inputs
+
+
+@pytest.mark.parametrize("mutation", ["count", "decision", "missing_input", "missing_observation", "first_assistant", "tools"])
+def test_context_checker_rejects_corruption_even_if_size_is_recalculated(monkeypatch, tmp_path, mutation):
+    from repo_agent.checks import check_record
+
+    record = run_scripted(monkeypatch, tmp_path, [
+        request("read_file", {"path": "src/Order.java"}, 1), answer("已读取"),
+    ])
+    assert check_record(record)["ok"]
+    if mutation == "count":
+        record["model_inputs"][0]["chars"] += 1
+    elif mutation == "decision":
+        record["model_inputs"][0]["decision"] = "blocked"
+    elif mutation == "missing_input":
+        record["model_inputs"].pop()
+    elif mutation == "missing_observation":
+        snapshot = record["model_inputs"][1]
+        snapshot["payload"]["input"] = [i for i in snapshot["payload"]["input"]
+                                           if i.get("type") != "function_call_output"]
+        snapshot["chars"] = len(json.dumps(snapshot["payload"], ensure_ascii=False, sort_keys=True,
+                                           separators=(",", ":")))
+    else:
+        snapshots = record["model_inputs"] if mutation == "tools" else record["model_inputs"][:1]
+        for snapshot in snapshots:
+            if mutation == "tools":
+                snapshot["payload"]["tools"] = []
+            else:
+                snapshot["payload"]["input"].append({"role": "assistant", "content": "fabricated evidence"})
+            snapshot["chars"] = len(json.dumps(snapshot["payload"], ensure_ascii=False, sort_keys=True,
+                                               separators=(",", ":")))
+    assert not check_record(record)["ok"]
+
+
+def test_context_checker_accepts_legacy_records_without_inventing_model_inputs(monkeypatch, tmp_path):
+    from repo_agent.checks import check_record
+
+    record = run_scripted(monkeypatch, tmp_path, [
+        request("read_file", {"path": "src/Order.java"}, 1), answer("已读取"),
+    ])
+    for key in ("context_format", "context_char_limit", "model_inputs"):
+        record.pop(key)
+    report = check_record(record)
+    assert report["ok"] and report["prepared_model_inputs"] is None
+
+
+def test_policy_continuation_keeps_restrictive_conditions_available():
+    tools = repository_tools(load_sources(Path("fixtures/order-policy")))
+    read = next(t for t in tools if t.name == "read_file")
+    first = invoke(read, {"path": "closure-policy.md"})
+    assert first["next_start_line"] == 121 and "UNPAID" not in first["content"]
+    rest = invoke(read, {"path": "closure-policy.md", "start_line": 121, "end_line": 142})
+    assert not rest["truncated"]
+    assert "合成演练副本" in rest["content"] and "UNPAID" in rest["content"]
+    assert "UNKNOWN" in rest["content"] and "不调用任何写接口" in rest["content"]
+    assert first["snapshot_id"] == rest["snapshot_id"]

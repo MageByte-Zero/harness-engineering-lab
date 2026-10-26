@@ -142,3 +142,19 @@ uv run --frozen python examples/repo_reading/05_check.py runs/repo-reading-07/gu
 ```
 
 请使用尚未存在的输出路径，保留报错与预算停止的记录；一次失败后循环仍会继续。更严格的对照可在第二次试次中交换两种指令的先后。先运行离线检查，再按 `05_reference.md` 审读答案，尤其检查含糊任务的检查范围和故障任务的证据缺口。不要只比较排版、调用次数或 `answer_returned`；固定请求配置也不能证明代理底层模型未变。
+
+## 模型输入记录与体量限制
+
+两个运行 CLI 都接受 `--context-char-limit`，默认60000，必须为正数。SDK 每次调用模型前，应用记录 `model_inputs`：`call_index`、`payload`、`chars` 与 `decision`。payload 包含完整指令、SDK 输入项和三个静态函数工具的名称/描述/参数 Schema/strict；计数为 `json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的字符长度。它是可复核的应用格式，不是 HTTP 请求字节数、模型 token 数或费用。
+
+`allowed` 只表示通过应用门禁，后续仍可能网络失败；`blocked` 表示调用前被阻止，停止原因是 `context_budget_exhausted`。原始工具观察和这次准备输入仍保留，程序不自动删历史、摘要、重试或恢复。SDK 的字典工具结果以 `str(result)` 回填，原观察日志则以 JSON 留存，检查器按锁定版本核对两者。
+
+```bash
+uv run --frozen python examples/repo_reading/05_tasks.py --task closure-policy --output runs/context-example/policy.json
+uv run --frozen python examples/repo_reading/05_tasks.py --task closure-policy --context-char-limit 2200 --output runs/context-example/limited.json
+uv run --frozen python examples/repo_reading/05_check.py runs/context-example/limited.json
+```
+
+第二条可能以退出码1明确停止，之后继续运行检查命令；工具选择会改变输入增长，查看实际记录，不保证每次在同一步停止。`closure-policy` 只读一份142行的合成规程；有效条件在136–138行，默认1–120行读取不够。独立接受条件见 [05_reference.md](05_reference.md#closure-policy资料长度与遗漏限制)，参考不送入模型。
+
+新记录标记 `context_format: sdk-input-v1`，检查器检查计数、门禁决策、调用关联及工具观察回填。旧记录没有该标记时仍按原观察契约核对，不补造历史模型输入。静态三个函数工具的声明才适用本计数；将来接入动态工具或 MCP 时须同步捕获实际解析后的声明。

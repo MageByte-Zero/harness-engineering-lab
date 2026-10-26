@@ -3,13 +3,17 @@
 import json
 from pathlib import PurePosixPath
 
-from repo_agent.tools import SOURCE_SUFFIXES, snapshot_hash, source_hash
+from agents import FunctionTool
+
+from repo_agent.tools import SOURCE_SUFFIXES, repository_tools, snapshot_hash, source_hash
 
 
 def check_record(record):
     errors = []
     requests, results, signatures = {}, set(), set()
+    call_batches, tool_outputs = [], {}
     model_messages = reads = repeated = 0
+    prepared_inputs, blocked_inputs = None, 0
     try:
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
@@ -19,6 +23,7 @@ def check_record(record):
             for message in (event["state"] or {}).get("messages", []):
                 if message["type"] == "ai":
                     model_messages += 1
+                    call_batches.append(message.get("tool_calls", []))
                     for call in message.get("tool_calls", []):
                         if call["id"] in requests:
                             errors.append("duplicate_call_id")
@@ -34,6 +39,8 @@ def check_record(record):
                         continue
                     results.add(call_id)
                     result = json.loads(message["content"])
+                    # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
+                    tool_outputs[call_id] = str(result)
                     if record.get("tool_contract_version") == 2 or "snapshot_id" in result:
                         if result.get("snapshot_id") != snapshot_id:
                             errors.append("snapshot_identity")
@@ -73,6 +80,56 @@ def check_record(record):
                                 or result["repository_complete"] is not False
                                 or result["supported_suffixes"] != sorted(SOURCE_SUFFIXES)):
                             errors.append("list_observation")
+        if "context_format" in record:
+            if record["context_format"] != "sdk-input-v1":
+                errors.append("context_format")
+            snapshots, limit = record["model_inputs"], record["context_char_limit"]
+            if not isinstance(snapshots, list) or not isinstance(limit, int) or limit <= 0:
+                errors.append("context_budget")
+            else:
+                prepared_inputs = len(snapshots)
+                expected_tools = [{"name": t.name, "description": t.description,
+                                   "parameters": t.params_json_schema, "strict": t.strict_json_schema}
+                                  for t in repository_tools({p: s["content"] for p, s in sources.items()})
+                                  if isinstance(t, FunctionTool)]
+                decisions = []
+                for index, snapshot in enumerate(snapshots, 1):
+                    payload = snapshot["payload"]
+                    chars = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                    decision = "blocked" if chars > limit else "allowed"
+                    decisions.append(snapshot["decision"])
+                    if (snapshot["call_index"] != index or snapshot["chars"] != chars
+                            or snapshot["decision"] != decision):
+                        errors.append("context_budget")
+                    items = payload["input"]
+                    if (payload["instructions"] != record["instructions"]
+                            or payload["tools"] != expected_tools
+                            or (index == 1 and items != [{"role": "user", "content": record["question"]}])
+                            or [i for i in items if i.get("role") == "user"]
+                            != [{"role": "user", "content": record["question"]}]):
+                        errors.append("context_input")
+                    expected = {c["id"]: c for batch in call_batches[:index - 1] for c in batch}
+                    calls = [i for i in items if i.get("type") == "function_call"]
+                    outputs = [i for i in items if i.get("type") == "function_call_output"]
+                    if ({c["call_id"] for c in calls} != set(expected) or len(calls) != len(expected)
+                            or {o["call_id"] for o in outputs} != set(expected) or len(outputs) != len(expected)):
+                        errors.append("context_history")
+                    for call in calls:
+                        original = expected.get(call["call_id"])
+                        if (not original or original["name"] != call["name"]
+                                or original["args"] != json.loads(call["arguments"])):
+                            errors.append("context_history")
+                    for output in outputs:
+                        if output["output"] != tool_outputs.get(output["call_id"]):
+                            errors.append("context_observation")
+                allowed, blocked = decisions.count("allowed"), decisions.count("blocked")
+                blocked_inputs = blocked
+                if (allowed not in (model_messages, model_messages + 1) or blocked > 1
+                        or (record["stop_reason"] in ("answer_returned", "no_source_read", "no_answer")
+                            and allowed != model_messages)
+                        or (blocked and decisions[-1] != "blocked")
+                        or bool(blocked) != (record["stop_reason"] == "context_budget_exhausted")):
+                    errors.append("context_sequence")
         if not record.get("finished_at") or not record.get("stop_reason"):
             errors.append("unfinished_record")
         if record["stop_reason"] == "answer_returned":
@@ -84,4 +141,5 @@ def check_record(record):
             "stop_reason": record.get("stop_reason"), "observed_model_messages": model_messages,
             "requested_tools": len(requests), "observed_tool_results": len(results),
             "successful_reads": reads, "repeated_requests": repeated,
+            "prepared_model_inputs": prepared_inputs, "blocked_model_inputs": blocked_inputs,
             "pending_tool_ids": sorted(set(requests) - results), "semantic_review": "pending"}

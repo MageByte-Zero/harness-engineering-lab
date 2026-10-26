@@ -13,10 +13,11 @@ def main():
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--question", default=QUESTION)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--context-char-limit", type=int, default=60000, help="Maximum prepared SDK input characters, not tokens")
     args = parser.parse_args()
     if not args.question.strip():
         parser.error("Question must not be empty")
-    record = run_repository(args.repo, args.question, args.output)
+    record = run_repository(args.repo, args.question, args.output, context_char_limit=args.context_char_limit)
     if record["stop_reason"] != "answer_returned":
         raise SystemExit(1)
 

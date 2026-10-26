@@ -10,7 +10,7 @@ import subprocess
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from agents import RunConfig, RunHooks, Runner
+from agents import FunctionTool, RunConfig, RunHooks, Runner
 from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
 from agents.tool_context import ToolContext
 import httpx
@@ -28,16 +28,24 @@ class ToolBudgetExceeded(RuntimeError):
     """The observed batch would exceed this application's tool-request budget."""
 
 
-def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None, instructions: str = INSTRUCTIONS):
+class ContextBudgetExceeded(RuntimeError):
+    """The prepared SDK input exceeds the application's character budget."""
+
+
+def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None,
+                   instructions: str = INSTRUCTIONS, context_char_limit: int = 60000):
     if not question.strip():
         raise ValueError("Question must not be empty")
     if not instructions.strip():
         raise ValueError("Instructions must not be empty")
+    if context_char_limit <= 0:
+        raise ValueError("Context character limit must be positive")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     record = {"run_id": str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
               "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1", "tool_contract_version": 2,
               "question": question, "task_id": task_id, "instructions": instructions, "events": [],
               "answer": None, "stop_reason": None, "error": None, "review": None, "tool_issues": [],
+              "context_format": "sdk-input-v1", "context_char_limit": context_char_limit, "model_inputs": [],
               "python": platform.python_version(),
               "versions": {p: version(p) for p in ("openai-agents", "openai", "pydantic")}}
     # Reserve before calling a paid API; a typo must not overwrite a previous run.
@@ -56,6 +64,24 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
         class ObservationHooks(RunHooks):
             requested = 0
             read_observed = False
+
+            async def on_llm_start(self, context, agent, system_prompt, input_items):
+                tools = []
+                # This app has three static function tools; dynamic/MCP tools need resolved declarations here.
+                for tool in agent.tools:
+                    if not isinstance(tool, FunctionTool):
+                        raise TypeError("Repository input capture requires static function tools")
+                    tools.append({"name": tool.name, "description": tool.description,
+                                  "parameters": tool.params_json_schema, "strict": tool.strict_json_schema})
+                payload = {"instructions": system_prompt, "input": input_items, "tools": tools}
+                serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                blocked = len(serialized) > context_char_limit
+                record["model_inputs"].append({"call_index": len(record["model_inputs"]) + 1,
+                    "payload": json.loads(serialized), "chars": len(serialized),
+                    "decision": "blocked" if blocked else "allowed"})
+                save()
+                if blocked:
+                    raise ContextBudgetExceeded()
 
             async def on_llm_end(self, context, agent, response):
                 calls, text = [], []
@@ -121,6 +147,8 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
                 stop = "model_budget_exhausted"
             elif isinstance(exc, ToolBudgetExceeded):
                 stop = "tool_budget_exhausted"
+            elif isinstance(exc, ContextBudgetExceeded):
+                stop = "context_budget_exhausted"
             elif isinstance(exc, (APITimeoutError, httpx.TimeoutException)):
                 stop = "model_timeout"
             elif isinstance(exc, subprocess.TimeoutExpired) or isinstance(exc.__cause__, subprocess.TimeoutExpired):

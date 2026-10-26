@@ -1,5 +1,10 @@
 [
   {
+    "id": "closure-policy",
+    "repo": "fixtures/order-policy",
+    "question": "根据这份材料，是否可以将所有创建超过30分钟的订单关闭？请说明允许范围、禁止情形和源码或材料依据；不执行任何操作。"
+  },
+  {
     "id": "full-chain",
     "repo": "fixtures/order-service",
     "question": "查询单个订单的 HTTP 接口在哪里？它如何取得订单，订单不存在时返回什么？请给出源码依据。"
