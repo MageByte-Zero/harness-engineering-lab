@@ -1,5 +1,6 @@
 """Observe the SDK loop and retain mechanical outcomes, never semantic grades."""
 
+import asyncio
 from datetime import datetime, timezone
 from importlib.metadata import version
 import json
@@ -17,7 +18,8 @@ import httpx
 from openai import APITimeoutError
 
 from repo_agent.agent import INSTRUCTIONS, build_agent
-from repo_agent.tools import load_sources, source_hash
+from repo_agent.tools import load_source_bundle, load_sources, source_hash
+from repo_agent.retrieval import collect_fixed, fixed_input, validate_queries
 from repo_agent import model as model_module
 
 MODEL_LIMIT = 12
@@ -32,14 +34,17 @@ class ContextBudgetExceeded(RuntimeError):
     """The prepared SDK input exceeds the application's character budget."""
 
 
-def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None,
-                   instructions: str = INSTRUCTIONS, context_char_limit: int = 60000):
+def run_repository(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
+                   instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
+                   retrieval_queries: tuple[str, ...] | None = None):
     if not question.strip():
         raise ValueError("Question must not be empty")
     if not instructions.strip():
         raise ValueError("Instructions must not be empty")
     if context_char_limit <= 0:
         raise ValueError("Context character limit must be positive")
+    if retrieval_queries is not None:
+        validate_queries(retrieval_queries)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     record = {"run_id": str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
               "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1", "tool_contract_version": 2,
@@ -67,7 +72,7 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
 
             async def on_llm_start(self, context, agent, system_prompt, input_items):
                 tools = []
-                # This app has three static function tools; dynamic/MCP tools need resolved declarations here.
+                # Dynamic/MCP tools would need their resolved declarations captured here.
                 for tool in agent.tools:
                     if not isinstance(tool, FunctionTool):
                         raise TypeError("Repository input capture requires static function tools")
@@ -127,17 +132,39 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
                 save()
 
         try:
-            sources = load_sources(repo)
+            sources = load_source_bundle(repo) if isinstance(repo, dict) else load_sources(repo)
             record["sources"] = {p: {"sha256": source_hash(c), "content": c} for p, c in sources.items()}
+            hooks = ObservationHooks()
+            sdk_input = question
+            if retrieval_queries is not None:
+                phase = 'retrieval'
+                record['retrieval'] = {'strategy': 'fixed', 'queries': list(retrieval_queries),
+                                       'complete': False, 'limited': False}
+
+                def retain(observation):
+                    hooks.read_observed |= (observation['name'] == 'read_file'
+                                            and observation['result']['status'] == 'ok')
+                    record['events'].append({'node': 'retrieval', 'state': {'messages': [
+                        {'type': 'prefetch', 'name': observation['name'], 'args': observation['args'],
+                         'content': json.dumps(observation['result'], ensure_ascii=False)}]}})
+                    save()
+
+                save()
+                record['retrieval']['limited'] = asyncio.run(collect_fixed(
+                    sources, retrieval_queries, limit=TOOL_LIMIT, emit=retain))
+                record['retrieval']['complete'] = True
+                sdk_input = fixed_input(question, record)
             phase = "model"
             model = model_module.create_model()
             record["model_config"] = {"requested_model": model.model,
                 "endpoint_host": urlsplit(os.environ.get("MODEL_BASE_URL", "")).hostname,
                 "protocol": "chat_completions", "timeout_seconds": 90, "max_retries": 0,
                 "model_limit": MODEL_LIMIT, "tool_limit": TOOL_LIMIT, "remote_tracing": False}
-            hooks = ObservationHooks()
+            agent = build_agent(model, sources, instructions=instructions)
+            if retrieval_queries is not None:
+                agent.tools = []
             save()
-            result = Runner.run_sync(build_agent(model, sources, instructions=instructions), question,
+            result = Runner.run_sync(agent, sdk_input,
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
             record["answer"] = result.final_output
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
@@ -158,7 +185,8 @@ def run_repository(repo: Path, question: str, output_path: Path, *, task_id=None
             elif isinstance(exc, ModelBehaviorError):
                 stop = "model_error"
             else:
-                stop = "tool_error" if pending else "input_error" if phase == "input" else "model_error"
+                stop = ("tool_error" if pending or phase == 'retrieval'
+                        else "input_error" if phase == "input" else "model_error")
             # Error text/HTTP bodies can contain secrets; retain only safe identifiers.
             record["error"] = {"type": type(exc).__name__, "status_code": getattr(exc, "status_code", None)}
             record["stop_reason"] = stop

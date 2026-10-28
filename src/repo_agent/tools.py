@@ -43,6 +43,17 @@ def source_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def load_source_bundle(roots: dict[str, Path]) -> dict[str, str]:
+    """Combine explicitly selected inputs without losing their source namespaces."""
+    if not roots or any(not name.isidentifier() for name in roots):
+        raise ValueError("Source bundle requires non-empty identifier namespaces")
+    sources = {f"{name}/{path}": content for name, root in roots.items()
+               for path, content in load_sources(root).items()}
+    if len(sources) > 100 or sum(len(c.encode('utf-8')) for c in sources.values()) > 2_000_000:
+        raise ValueError("Teaching snapshot exceeds its size limit")
+    return sources
+
+
 def snapshot_hash(sources: dict[str, str]) -> str:
     manifest = {path: source_hash(content) for path, content in sources.items()}
     return source_hash(json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")))

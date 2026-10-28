@@ -6,19 +6,23 @@ from pathlib import PurePosixPath
 from agents import FunctionTool
 
 from repo_agent.tools import SOURCE_SUFFIXES, repository_tools, snapshot_hash, source_hash
+from repo_agent.retrieval import fixed_input, validate_queries
 
 
 def check_record(record):
     errors = []
     requests, results, signatures = {}, set(), set()
     call_batches, tool_outputs = [], {}
-    model_messages = reads = repeated = 0
+    model_messages = reads = repeated = prefetched = 0
     prepared_inputs, blocked_inputs = None, 0
     try:
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
             errors.append("snapshot_hash")
         snapshot_id = snapshot_hash({path: source["content"] for path, source in sources.items()})
+        fixed = record.get('retrieval', {}).get('strategy') == 'fixed'
+        if fixed:
+            validate_queries(record['retrieval']['queries'])
         for event in record["events"]:
             for message in (event["state"] or {}).get("messages", []):
                 if message["type"] == "ai":
@@ -31,16 +35,24 @@ def check_record(record):
                         signature = (call["name"], json.dumps(call["args"], sort_keys=True))
                         repeated += signature in signatures
                         signatures.add(signature)
-                elif message["type"] == "tool":
-                    call_id = message["tool_call_id"]
-                    call = requests.get(call_id)
-                    if not call or call["name"] != message["name"] or call_id in results:
-                        errors.append("tool_call_id")
-                        continue
-                    results.add(call_id)
+                elif message["type"] in ("tool", "prefetch"):
+                    if message['type'] == 'prefetch':
+                        prefetched += 1
+                        if not fixed or message['name'] not in ('search_code', 'read_file') or prefetched > 16:
+                            errors.append('prefetch_contract')
+                        call = {'name': message['name'], 'args': message['args']}
+                        call_id = None
+                    else:
+                        call_id = message["tool_call_id"]
+                        call = requests.get(call_id)
+                        if not call or call["name"] != message["name"] or call_id in results:
+                            errors.append("tool_call_id")
+                            continue
+                        results.add(call_id)
                     result = json.loads(message["content"])
                     # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
-                    tool_outputs[call_id] = str(result)
+                    if call_id is not None:
+                        tool_outputs[call_id] = str(result)
                     if record.get("tool_contract_version") == 2 or "snapshot_id" in result:
                         if result.get("snapshot_id") != snapshot_id:
                             errors.append("snapshot_identity")
@@ -92,6 +104,10 @@ def check_record(record):
                                    "parameters": t.params_json_schema, "strict": t.strict_json_schema}
                                   for t in repository_tools({p: s["content"] for p, s in sources.items()})
                                   if isinstance(t, FunctionTool)]
+                if fixed:
+                    expected_tools = []
+                expected_input = (fixed_input(record['question'], record) if fixed else
+                                  [{'role': 'user', 'content': record['question']}])
                 decisions = []
                 for index, snapshot in enumerate(snapshots, 1):
                     payload = snapshot["payload"]
@@ -104,9 +120,9 @@ def check_record(record):
                     items = payload["input"]
                     if (payload["instructions"] != record["instructions"]
                             or payload["tools"] != expected_tools
-                            or (index == 1 and items != [{"role": "user", "content": record["question"]}])
+                            or (index == 1 and items != expected_input)
                             or [i for i in items if i.get("role") == "user"]
-                            != [{"role": "user", "content": record["question"]}]):
+                            != expected_input):
                         errors.append("context_input")
                     expected = {c["id"]: c for batch in call_batches[:index - 1] for c in batch}
                     calls = [i for i in items if i.get("type") == "function_call"]
@@ -140,6 +156,7 @@ def check_record(record):
     return {"ok": not errors, "errors": sorted(set(errors)), "run_id": record.get("run_id"),
             "stop_reason": record.get("stop_reason"), "observed_model_messages": model_messages,
             "requested_tools": len(requests), "observed_tool_results": len(results),
+            "prefetched_tools": prefetched,
             "successful_reads": reads, "repeated_requests": repeated,
             "prepared_model_inputs": prepared_inputs, "blocked_model_inputs": blocked_inputs,
             "pending_tool_ids": sorted(set(requests) - results), "semantic_review": "pending"}

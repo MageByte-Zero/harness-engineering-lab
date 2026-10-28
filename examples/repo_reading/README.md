@@ -1,4 +1,4 @@
-# 第 4–6 讲：仓库阅读 Agent
+# 第 4–9 讲：仓库阅读 Agent
 
 对应课程修订 `2026-10-25-openai-agents-sdk`，使用 OpenAI Agents SDK 0.24.0。本目录是唯一课程运行入口，共用 `src/repo_agent/` 的应用源码；第 4、5 讲共用同一实现，固定版本入口由下方标签和文章给出。读者按文章给出的固定 commit 获取同一份源码。旧示例已从当前工作区移除，历史标签与查看方式见[仓库说明](../../README.md#历史版本与仓库边界)。
 
@@ -158,3 +158,25 @@ uv run --frozen python examples/repo_reading/05_check.py runs/context-example/li
 第二条可能以退出码1明确停止，之后继续运行检查命令；工具选择会改变输入增长，查看实际记录，不保证每次在同一步停止。`closure-policy` 只读一份142行的合成规程；有效条件在136–138行，默认1–120行读取不够。独立接受条件见 [05_reference.md](05_reference.md#closure-policy资料长度与遗漏限制)，参考不送入模型。
 
 新记录标记 `context_format: sdk-input-v1`，检查器检查计数、门禁决策、调用关联及工具观察回填。旧记录没有该标记时仍按原观察契约核对，不补造历史模型输入。静态三个函数工具的声明才适用本计数；将来接入动态工具或 MCP 时须同步捕获实际解析后的声明。
+
+## 固定取材与 Agent 按需取材
+
+在同一应用上比较两种获取配置：
+
+```bash
+uv sync --frozen
+uv run --frozen python examples/repo_reading/09_retrieval.py --task review --strategy fixed --output runs/retrieval-example/fixed.json
+uv run --frozen python examples/repo_reading/09_retrieval.py --task review --strategy agent --output runs/retrieval-example/agent.json
+uv run --frozen python examples/repo_reading/05_check.py runs/retrieval-example/fixed.json
+uv run --frozen python examples/repo_reading/05_check.py runs/retrieval-example/agent.json
+```
+
+两个策略绑定相同的`code`、`policy`和`guidance`命名空间，复用前讲源码及规程，不修改原始输入；`source-index.md`声明当前/历史规程的适用性。`09_tasks.json`公开六项任务和固定查询词，`09_reference.md`保留独立接受条件，不交给模型。
+
+`fixed`由程序先执行三条公开的类别查询，对未覆盖命中读取前后三行，总计最多16次搜索/读取，再由同一SDK Runner调用模型回答，不向回答模型暴露工具。它不能自行换词或补查。`agent`从相同问题出发，自选既有三个文件工具，仍由Runner驱动循环。两者使用同一模型配置、60000字符门禁、12轮模型上限和16次取材动作上限；实际调用次数、工具声明和输入内容不同。这是两种应用配置的对照，不是只改变一条指令的实验，也不保证提供商底层模型身份固定。
+
+固定取材记录的`retrieval`保留查询词、阶段是否完成和是否存在截断/预算限制；`events`中的`type: prefetch`是程序实际执行的取材，不能当成模型发出的工具请求。预取结果以明确标注的数据消息进入模型输入，接受同一个字符门禁。`05_check.py`核对其来源、行段和回填；`prefetched_tools`与`requested_tools`分别表示程序预取动作和模型提出的工具请求。取材失败、预算中止或模型超时仍保留已有输出。
+
+模型返回答案后继续按独立参考检查：是否取得必要原文、引用范围是否实际读过、版本是否适用，以及答案是否保留关键条件。固定关键词没有覆盖`payment`任务的支付核对说明，不能据此推断必须用Embedding；可以先扩展固定查询或允许Agent换词补查。没有实际订单状态和执行日志时，两种策略都不能得出某笔订单的真实原因。
+
+重复运行使用新文件名。批量对照可对`review/paraphrase/versions/missing/live/payment`分别执行两种策略，并交换先后顺序；保留全部失败。分块、Embedding与向量库未在这个入口实现。

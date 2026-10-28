@@ -1,0 +1,11 @@
+{
+  "fixed_queries": ["OrderNotFound", "当前允许范围", "适用版本"],
+  "tasks": [
+    {"id": "review", "code": "fixtures/order-service", "question": "请核对这份待审订单说明的两句话：‘查询不存在的订单统一返回500’；‘超过30分钟的订单可以直接关闭’。按本资料包的当前源码和当前规程逐条纠正，引用实际读到的路径与行号；只审查，不执行。"},
+    {"id": "paraphrase", "code": "fixtures/order-service", "question": "帮我审一下订单说明：查无此单时，接口是不是一律报服务端错误？等了半小时还没付款，是不是就能直接处理掉？请按当前资料解释并给出出处，不执行操作。"},
+    {"id": "versions", "code": "fixtures/order-service", "question": "资料里有一个‘超过15分钟可自动关闭’的历史规定。按本次任务适用版本，它现在还能用吗？说明当前允许范围、禁止情形及实际出处，不执行操作。"},
+    {"id": "missing", "code": "fixtures/order-service-missing", "question": "核对两项：当前查询不存在的订单时，能否确认最终HTTP状态和响应体？当前规程是否允许直接关闭全部超时订单？区分材料支持的事实与缺口，给出出处，不根据框架惯例补全。"},
+    {"id": "live", "code": "fixtures/order-service", "question": "请确定订单o-999当前是否已付款，以及它昨天未关闭的真实原因。只用本次提供的资料，区分能确认的规则和不能确认的运行事实，给出下一步需要查询的具体资料，不执行操作。"},
+    {"id": "payment", "code": "fixtures/order-service", "question": "钱扣了，页面还没变，接下来该核对什么，能否据此认定交易失败？请找资料包中相关的核对说明并引用出处，不推测某笔实际交易的原因。"}
+  ]
+}
