@@ -9,6 +9,48 @@ from repo_agent.tools import SOURCE_SUFFIXES, repository_tools, snapshot_hash, s
 from repo_agent.retrieval import fixed_input, validate_queries
 
 
+def check_prefetch(record):
+    """Check the fixed plan using retained observations, without rerunning tools."""
+    state = record['retrieval']
+    pending = [('search_code', {'keyword': q}) for q in state['queries']]
+    observations = [m for e in record['events'] for m in e['state']['messages'] if m['type'] == 'prefetch']
+    matches, covered, read_phase = [], [], False
+    limited, failed = False, False
+
+    def schedule_reads():
+        for match in matches:
+            path, line = match['path'], match['line']
+            if any(p == path and start <= line <= end for p, start, end in covered):
+                continue
+            start = max(1, line - 3)
+            end = min(len(record['sources'][path]['content'].splitlines()), line + 3)
+            pending.append(('read_file', {'path': path, 'start_line': start, 'end_line': end}))
+            covered.append((path, start, end))
+
+    for observation in observations:
+        if not pending and not read_phase:
+            schedule_reads()
+            read_phase = True
+        if failed or not pending or (observation['name'], observation['args']) != pending.pop(0):
+            return False
+        result = json.loads(observation['content'])
+        failed = result['status'] != 'ok'
+        if not failed and observation['name'] == 'search_code':
+            matches.extend(result['matches'])
+            limited |= result['truncated'] or any(m['excerpt_truncated'] for m in result['matches'])
+        elif not failed:
+            limited |= result['content_truncated']
+    if not pending and not read_phase and not failed:
+        schedule_reads()
+    complete = not failed and (not pending or len(observations) == 16)
+    limited |= bool(pending) and len(observations) == 16
+    if state['complete'] is True:
+        return complete and state['limited'] is bool(limited)
+    return (state['complete'] is False and state['limited'] is False
+            and record['stop_reason'] in ('tool_error', 'tool_timeout', 'cancelled')
+            and not record['model_inputs'])
+
+
 def check_record(record):
     errors = []
     requests, results, signatures = {}, set(), set()
@@ -23,6 +65,8 @@ def check_record(record):
         fixed = record.get('retrieval', {}).get('strategy') == 'fixed'
         if fixed:
             validate_queries(record['retrieval']['queries'])
+            if not check_prefetch(record):
+                errors.append('prefetch_contract')
         for event in record["events"]:
             for message in (event["state"] or {}).get("messages", []):
                 if message["type"] == "ai":

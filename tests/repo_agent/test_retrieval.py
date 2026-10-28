@@ -158,3 +158,37 @@ def test_fixed_search_failure_is_retained_and_does_not_call_model(monkeypatch, t
     assert record['retrieval']['complete'] is False
     assert check_record(record)['ok']
     assert 'SECRET' not in (tmp_path / 'failed.json').read_text()
+    record['retrieval']['complete'] = True
+    assert 'prefetch_contract' in check_record(record)['errors']
+
+
+def test_checker_rejects_query_and_prefetch_plan_tampering(monkeypatch, tmp_path):
+    import json
+    from repo_agent import model as model_module
+    from repo_agent.execution import run_repository
+    from repo_agent.checks import check_record
+    from repo_agent.retrieval import fixed_input
+
+    monkeypatch.setattr(model_module, 'create_model', lambda: ScriptedModel([answer('替身回答')]))
+    record = run_repository(Path('fixtures/order-service'), 'check', tmp_path / 'plan.json',
+                            retrieval_queries=('OrderNotFound',))
+    assert check_record(record)['ok']
+    for change in ('query', 'remove_search', 'limited', 'complete', 'read_range'):
+        damaged = copy.deepcopy(record)
+        if change == 'query':
+            damaged['retrieval']['queries'] = ['never-present-marker']
+        elif change == 'remove_search':
+            damaged['events'] = [e for e in damaged['events']
+                if not any(m['type'] == 'prefetch' and m['name'] == 'search_code'
+                           for m in e['state']['messages'])]
+        elif change in ('limited', 'complete'):
+            damaged['retrieval'][change] = not damaged['retrieval'][change]
+        else:
+            message = next(m for e in damaged['events'] for m in e['state']['messages']
+                           if m['type'] == 'prefetch' and m['name'] == 'read_file')
+            message['args']['end_line'] += 1
+        payload = damaged['model_inputs'][0]['payload']
+        payload['input'] = fixed_input(damaged['question'], damaged)
+        damaged['model_inputs'][0]['chars'] = len(json.dumps(payload, ensure_ascii=False,
+                                                        sort_keys=True, separators=(',', ':')))
+        assert 'prefetch_contract' in check_record(damaged)['errors'], change
