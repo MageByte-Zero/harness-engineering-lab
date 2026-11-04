@@ -57,6 +57,7 @@ def check_record(record):
     call_batches, tool_outputs = [], {}
     model_messages = reads = repeated = prefetched = 0
     prepared_inputs, blocked_inputs = None, 0
+    api_reads, api_observations = 0, []
     try:
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
@@ -97,6 +98,40 @@ def check_record(record):
                     # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
                     if call_id is not None:
                         tool_outputs[call_id] = str(result)
+                    if message['name'] in ('get_order_status', 'get_order_events'):
+                        from repo_agent.business import validate_data
+                        business = record['business']
+                        kind = 'status' if message['name'] == 'get_order_status' else 'events'
+                        oid = call['args']['order_id']
+                        path = f'/api/v1/orders/{oid}' + ('/events' if kind == 'events' else '')
+                        if (business['contract'] != 'business-readonly-v1'
+                                or result.get('scope') != 'business_readonly'
+                                or result.get('kind') != kind or result.get('order_id') != oid
+                                or not result.get('observed_at')
+                                or result.get('status') not in ('ok', 'denied', 'invalid_argument',
+                                    'unauthenticated', 'forbidden', 'not_found', 'rate_limited',
+                                    'timeout', 'unavailable', 'service_error', 'invalid_response')):
+                            errors.append('api_observation')
+                        status = result['status']
+                        http_status = result.get('http_status')
+                        expected_codes = {'ok': 200, 'unauthenticated': 401, 'forbidden': 403,
+                                          'not_found': 404, 'rate_limited': 429}
+                        if ((status in expected_codes and http_status != expected_codes[status])
+                                or (status in ('denied', 'invalid_argument') and
+                                    (http_status is not None or result['source'] is not None))
+                                or (status not in ('denied', 'invalid_argument') and
+                                    (oid not in business['allowed_orders'] or result['source'] != path))):
+                            errors.append('api_observation')
+                        if result['status'] == 'ok':
+                            if (oid not in business['allowed_orders'] or result['source'] != path
+                                    or result['http_status'] != 200
+                                    or validate_data(kind, result['data'], oid) != result['data']):
+                                errors.append('api_observation')
+                            api_reads += 1
+                        elif 'data' in result:
+                            errors.append('api_observation')
+                        api_observations.append(result)
+                        continue
                     if record.get("tool_contract_version") == 2 or "snapshot_id" in result:
                         if result.get("snapshot_id") != snapshot_id:
                             errors.append("snapshot_identity")
@@ -148,6 +183,11 @@ def check_record(record):
                                    "parameters": t.params_json_schema, "strict": t.strict_json_schema}
                                   for t in repository_tools({p: s["content"] for p, s in sources.items()})
                                   if isinstance(t, FunctionTool)]
+                if 'business' in record:
+                    from repo_agent.business import BusinessClient, business_tools
+                    expected_tools.extend({"name": t.name, "description": t.description,
+                        "parameters": t.params_json_schema, "strict": t.strict_json_schema}
+                        for t in business_tools(BusinessClient('http://127.0.0.1', 'offline-check')))
                 if fixed:
                     expected_tools = []
                 expected_input = (fixed_input(record['question'], record) if fixed else
@@ -185,15 +225,18 @@ def check_record(record):
                 allowed, blocked = decisions.count("allowed"), decisions.count("blocked")
                 blocked_inputs = blocked
                 if (allowed not in (model_messages, model_messages + 1) or blocked > 1
-                        or (record["stop_reason"] in ("answer_returned", "no_source_read", "no_answer")
+                        or (record["stop_reason"] in ("answer_returned", "no_source_read", "no_observation", "no_answer")
                             and allowed != model_messages)
                         or (blocked and decisions[-1] != "blocked")
                         or bool(blocked) != (record["stop_reason"] == "context_budget_exhausted")):
                     errors.append("context_sequence")
+        if 'business' in record and sorted(json.dumps(x, sort_keys=True) for x in api_observations) != sorted(
+                json.dumps(x, sort_keys=True) for x in record['business']['observations']):
+            errors.append('api_observation_ledger')
         if not record.get("finished_at") or not record.get("stop_reason"):
             errors.append("unfinished_record")
         if record["stop_reason"] == "answer_returned":
-            if not record.get("answer") or not reads or set(requests) != results:
+            if not record.get("answer") or not (reads or api_reads) or set(requests) != results:
                 errors.append("incomplete_answer_run")
     except (KeyError, TypeError, ValueError, IndexError, AttributeError):
         errors.append("invalid_record")
@@ -201,6 +244,6 @@ def check_record(record):
             "stop_reason": record.get("stop_reason"), "observed_model_messages": model_messages,
             "requested_tools": len(requests), "observed_tool_results": len(results),
             "prefetched_tools": prefetched,
-            "successful_reads": reads, "repeated_requests": repeated,
+            "successful_reads": reads, "successful_api_reads": api_reads, "repeated_requests": repeated,
             "prepared_model_inputs": prepared_inputs, "blocked_model_inputs": blocked_inputs,
             "pending_tool_ids": sorted(set(requests) - results), "semantic_review": "pending"}

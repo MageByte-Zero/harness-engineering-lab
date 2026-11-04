@@ -23,10 +23,10 @@ RETRIEVAL_INSTRUCTIONS = """你是只读资料审查助手，用中文回答当�
 最终分别给出已确认结论、依据和未确认事项；没有依据时不要拼造答案。"""
 
 
-def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS):
+def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS, extra_tools=()):
     return Agent(
         name="Repository reader",
         model=model,
-        tools=repository_tools(sources),
+        tools=[*repository_tools(sources), *extra_tools],
         instructions=instructions,
     )

@@ -36,7 +36,9 @@ class ContextBudgetExceeded(RuntimeError):
 
 def run_repository(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
-                   retrieval_queries: tuple[str, ...] | None = None):
+                   retrieval_queries: tuple[str, ...] | None = None, business_client=None):
+    if business_client is not None and (retrieval_queries is not None or business_client.observations):
+        raise ValueError("Business run requires a fresh client and agent retrieval")
     if not question.strip():
         raise ValueError("Question must not be empty")
     if not instructions.strip():
@@ -62,6 +64,8 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
             output.truncate()
             output.flush()
 
+        if business_client is not None:
+            record["business"] = {"contract": "business-readonly-v1", "allowed_orders": sorted(business_client.allowed_orders), "observations": business_client.observations}
         save()
         pending = set()
         phase = "input"
@@ -121,7 +125,9 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 if not isinstance(context, ToolContext) or not isinstance(result, dict):
                     raise TypeError("Repository tools require a tool-call context and a dictionary result")
                 pending.discard(context.tool_call_id)
-                self.read_observed |= tool.name == "read_file" and result.get("status") == "ok"
+                self.read_observed |= (tool.name == "read_file" or
+                    (business_client is not None and tool.name in ("get_order_status", "get_order_events")
+                     and result.get("scope") == "business_readonly")) and result.get("status") == "ok"
                 if result.get("status") != "ok":
                     record["tool_issues"].append({"call_id": context.tool_call_id,
                                                 "tool": tool.name, "status": result.get("status")})
@@ -160,7 +166,9 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 "endpoint_host": urlsplit(os.environ.get("MODEL_BASE_URL", "")).hostname,
                 "protocol": "chat_completions", "timeout_seconds": 90, "max_retries": 0,
                 "model_limit": MODEL_LIMIT, "tool_limit": TOOL_LIMIT, "remote_tracing": False}
-            agent = build_agent(model, sources, instructions=instructions)
+            from repo_agent.business import business_tools
+            extra_tools = business_tools(business_client) if business_client is not None else []
+            agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools)
             if retrieval_queries is not None:
                 agent.tools = []
             save()
@@ -168,7 +176,8 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
             record["answer"] = result.final_output
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
-                                     else "no_source_read" if not hooks.read_observed else "no_answer")
+                                     else ("no_observation" if business_client is not None else "no_source_read")
+                                     if not hooks.read_observed else "no_answer")
         except (Exception, KeyboardInterrupt) as exc:
             if isinstance(exc, MaxTurnsExceeded):
                 stop = "model_budget_exhausted"
