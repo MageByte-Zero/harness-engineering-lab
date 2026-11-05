@@ -57,7 +57,7 @@ def check_record(record):
     call_batches, tool_outputs = [], {}
     model_messages = reads = repeated = prefetched = 0
     prepared_inputs, blocked_inputs = None, 0
-    api_reads, api_observations = 0, []
+    api_reads, api_observations, observation_count = 0, [], 0
     try:
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
@@ -95,6 +95,10 @@ def check_record(record):
                             continue
                         results.add(call_id)
                     result = json.loads(message["content"])
+                    if 'output_contract' in record:
+                        observation_count += 1
+                        if result.get('observation_id') != f'obs-{observation_count}':
+                            errors.append('observation_identity')
                     # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
                     if call_id is not None:
                         tool_outputs[call_id] = str(result)
@@ -130,7 +134,7 @@ def check_record(record):
                             api_reads += 1
                         elif 'data' in result:
                             errors.append('api_observation')
-                        api_observations.append(result)
+                        api_observations.append({k: v for k, v in result.items() if k != 'observation_id'})
                         continue
                     if record.get("tool_contract_version") == 2 or "snapshot_id" in result:
                         if result.get("snapshot_id") != snapshot_id:
@@ -208,6 +212,10 @@ def check_record(record):
                             or [i for i in items if i.get("role") == "user"]
                             != expected_input):
                         errors.append("context_input")
+                    if 'output_contract' in record:
+                        from repo_agent.output import output_contract
+                        if payload.get('output_schema') != output_contract():
+                            errors.append('context_output_schema')
                     expected = {c["id"]: c for batch in call_batches[:index - 1] for c in batch}
                     calls = [i for i in items if i.get("type") == "function_call"]
                     outputs = [i for i in items if i.get("type") == "function_call_output"]
@@ -225,7 +233,7 @@ def check_record(record):
                 allowed, blocked = decisions.count("allowed"), decisions.count("blocked")
                 blocked_inputs = blocked
                 if (allowed not in (model_messages, model_messages + 1) or blocked > 1
-                        or (record["stop_reason"] in ("answer_returned", "no_source_read", "no_observation", "no_answer")
+                        or (record["stop_reason"] in ("answer_returned", "no_source_read", "no_observation", "no_answer", "output_invalid")
                             and allowed != model_messages)
                         or (blocked and decisions[-1] != "blocked")
                         or bool(blocked) != (record["stop_reason"] == "context_budget_exhausted")):
@@ -238,12 +246,36 @@ def check_record(record):
         if record["stop_reason"] == "answer_returned":
             if not record.get("answer") or not (reads or api_reads) or set(requests) != results:
                 errors.append("incomplete_answer_run")
+        if 'output_contract' in record:
+            from pydantic import ValidationError
+            from repo_agent.output import InvestigationAnswer, assess_answer, output_contract
+            if record['output_contract'] != output_contract():
+                errors.append('output_contract')
+            if record.get('answer_checks') != assess_answer(record):
+                errors.append('answer_checks')
+            if record.get('answer') is not None:
+                last = record['events'][-1]['state']['messages'][-1]
+                try:
+                    parsed = InvestigationAnswer.model_validate_json(last['content'])
+                    if (last['type'] != 'ai' or last.get('tool_calls')
+                            or parsed.model_dump(mode='json') != record['answer']):
+                        errors.append('final_output')
+                except ValidationError:
+                    errors.append('final_output')
     except (KeyError, TypeError, ValueError, IndexError, AttributeError):
         errors.append("invalid_record")
-    return {"ok": not errors, "errors": sorted(set(errors)), "run_id": record.get("run_id"),
+    report = {"ok": not errors, "errors": sorted(set(errors)), "run_id": record.get("run_id"),
             "stop_reason": record.get("stop_reason"), "observed_model_messages": model_messages,
             "requested_tools": len(requests), "observed_tool_results": len(results),
             "prefetched_tools": prefetched,
             "successful_reads": reads, "successful_api_reads": api_reads, "repeated_requests": repeated,
             "prepared_model_inputs": prepared_inputs, "blocked_model_inputs": blocked_inputs,
             "pending_tool_ids": sorted(set(requests) - results), "semantic_review": "pending"}
+    if 'output_contract' in record:
+        from repo_agent.output import assess_answer
+        try:
+            report['answer_checks'] = assess_answer(record)
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+            report['ok'] = False
+            report['errors'] = sorted(set([*report['errors'], 'invalid_answer_record']))
+    return report

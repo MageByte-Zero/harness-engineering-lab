@@ -1,6 +1,6 @@
 """Application instructions and tools, composed with the framework's loop."""
 
-from agents import Agent
+from agents import Agent, ModelSettings
 
 from repo_agent.tools import repository_tools
 
@@ -23,10 +23,16 @@ RETRIEVAL_INSTRUCTIONS = """你是只读资料审查助手，用中文回答当�
 最终分别给出已确认结论、依据和未确认事项；没有依据时不要拼造答案。"""
 
 
-def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS, extra_tools=()):
+def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS, extra_tools=(),
+                structured_output: bool = False):
+    from repo_agent.output import InvestigationAnswer, with_observation_ids
+    tools = [*repository_tools(sources), *extra_tools]
     return Agent(
         name="Repository reader",
         model=model,
-        tools=[*repository_tools(sources), *extra_tools],
+        tools=with_observation_ids(tools) if structured_output else tools,
         instructions=instructions,
+        output_type=InvestigationAnswer if structured_output else None,
+        model_settings=ModelSettings(tool_choice='required') if structured_output else ModelSettings(),
+        reset_tool_choice=True,
     )

@@ -16,11 +16,13 @@ from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
 from agents.tool_context import ToolContext
 import httpx
 from openai import APITimeoutError
+from pydantic import ValidationError
 
 from repo_agent.agent import INSTRUCTIONS, build_agent
 from repo_agent.tools import load_source_bundle, load_sources, source_hash
 from repo_agent.retrieval import collect_fixed, fixed_input, validate_queries
 from repo_agent import model as model_module
+from repo_agent.output import InvestigationAnswer, OUTPUT_INSTRUCTIONS, assess_answer, output_contract
 
 MODEL_LIMIT = 12
 TOOL_LIMIT = 16
@@ -36,13 +38,18 @@ class ContextBudgetExceeded(RuntimeError):
 
 def run_repository(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
-                   retrieval_queries: tuple[str, ...] | None = None, business_client=None):
+                   retrieval_queries: tuple[str, ...] | None = None, business_client=None,
+                   structured_output: bool = False):
+    if structured_output and retrieval_queries is not None:
+        raise ValueError('Structured answers currently use agent-selected tools, not fixed retrieval')
     if business_client is not None and (retrieval_queries is not None or business_client.observations):
         raise ValueError("Business run requires a fresh client and agent retrieval")
     if not question.strip():
         raise ValueError("Question must not be empty")
     if not instructions.strip():
         raise ValueError("Instructions must not be empty")
+    if structured_output:
+        instructions += OUTPUT_INSTRUCTIONS
     if context_char_limit <= 0:
         raise ValueError("Context character limit must be positive")
     if retrieval_queries is not None:
@@ -55,6 +62,8 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
               "context_format": "sdk-input-v1", "context_char_limit": context_char_limit, "model_inputs": [],
               "python": platform.python_version(),
               "versions": {p: version(p) for p in ("openai-agents", "openai", "pydantic")}}
+    if structured_output:
+        record['output_contract'] = output_contract()
     # Reserve before calling a paid API; a typo must not overwrite a previous run.
     with output_path.open("x", encoding="utf-8") as output:
         def save():
@@ -83,6 +92,8 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                     tools.append({"name": tool.name, "description": tool.description,
                                   "parameters": tool.params_json_schema, "strict": tool.strict_json_schema})
                 payload = {"instructions": system_prompt, "input": input_items, "tools": tools}
+                if structured_output:
+                    payload['output_schema'] = output_contract()
                 serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 blocked = len(serialized) > context_char_limit
                 record["model_inputs"].append({"call_index": len(record["model_inputs"]) + 1,
@@ -168,13 +179,15 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 "model_limit": MODEL_LIMIT, "tool_limit": TOOL_LIMIT, "remote_tracing": False}
             from repo_agent.business import business_tools
             extra_tools = business_tools(business_client) if business_client is not None else []
-            agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools)
+            agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools,
+                                structured_output=structured_output)
             if retrieval_queries is not None:
                 agent.tools = []
             save()
             result = Runner.run_sync(agent, sdk_input,
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
-            record["answer"] = result.final_output
+            record["answer"] = (result.final_output.model_dump(mode='json') if structured_output
+                                else result.final_output)
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
                                      else ("no_observation" if business_client is not None else "no_source_read")
                                      if not hooks.read_observed else "no_answer")
@@ -193,6 +206,14 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 stop = "cancelled"
             elif isinstance(exc, ModelBehaviorError):
                 stop = "model_error"
+                # Classify only a retained final text that fails our declared output type.
+                last = record['events'][-1]['state']['messages'][-1] if record['events'] else {}
+                if (structured_output and last.get('type') == 'ai'
+                        and not last.get('tool_calls') and last.get('content')):
+                    try:
+                        InvestigationAnswer.model_validate_json(last['content'])
+                    except ValidationError:
+                        stop = 'output_invalid'
             else:
                 stop = ("tool_error" if pending or phase == 'retrieval'
                         else "input_error" if phase == "input" else "model_error")
@@ -201,8 +222,10 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
             record["stop_reason"] = stop
         finally:
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            if structured_output:
+                record['answer_checks'] = assess_answer(record)
             save()
     print("Stop:", record["stop_reason"], "Record:", output_path)
     if record["answer"]:
-        print(record["answer"])
+        print(json.dumps(record['answer'], ensure_ascii=False) if structured_output else record["answer"])
     return record
