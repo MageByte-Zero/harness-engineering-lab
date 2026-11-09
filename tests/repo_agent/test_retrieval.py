@@ -151,7 +151,9 @@ def test_fixed_search_failure_is_retained_and_does_not_call_model(monkeypatch, t
 
     model = ScriptedModel([])
     monkeypatch.setattr(model_module, 'create_model', lambda: model)
-    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess([], 2, '', 'SECRET'))
+    async def failed_search(*args):
+        return 2, ""
+    monkeypatch.setattr("repo_agent.tools.search_text", failed_search)
     record = run_repository(Path('fixtures/order-service'), 'check', tmp_path / 'failed.json',
                             retrieval_queries=('OrderNotFound',))
     assert record['stop_reason'] == 'tool_error' and not model.inputs

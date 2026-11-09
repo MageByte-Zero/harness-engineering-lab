@@ -202,7 +202,9 @@ def test_model_limit_stops_instead_of_looping():
 
 
 def test_search_failure_is_not_empty_success(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 2, "", "private error"))
+    async def failed_search(*args):
+        return 2, ""
+    monkeypatch.setattr("repo_agent.tools.search_text", failed_search)
     search, *_ = repository_tools({"a.java": "class A {}"})
     result = invoke(search, {"keyword": "class"})
     assert result["status"] == "unavailable" and result["matches"] == []
@@ -241,7 +243,9 @@ def test_tool_budget_blocks_batch_before_unrequested_disk_reads(monkeypatch, tmp
 
 
 def test_tool_failure_remains_visible_after_agent_returns_answer(monkeypatch, tmp_path):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 2, "", "SECRET"))
+    async def failed_search(*args):
+        return 2, ""
+    monkeypatch.setattr("repo_agent.tools.search_text", failed_search)
     record = run_scripted(monkeypatch, tmp_path, [
         request("search_code", {"keyword": "Order"}, 1),
         request("read_file", {"path": "src/Order.java"}, 2),
@@ -262,19 +266,19 @@ def test_unexpected_tool_context_or_result_stops_before_recording_observation(mo
     model = ScriptedModel([])
     monkeypatch.setattr(model_module, "create_model", lambda: model)
 
-    def deliver_unexpected_result(agent, question, *, hooks, **kwargs):
-        asyncio.run(hooks.on_llm_start(None, agent, agent.instructions, [{"role": "user", "content": question}]))
+    async def deliver_unexpected_result(agent, question, *, hooks, **kwargs):
+        await hooks.on_llm_start(None, agent, agent.instructions, [{"role": "user", "content": question}])
         call = request("read_file", {"path": "src/Order.java"}, 1)
         response = ModelResponse(output=[call], usage=Usage(requests=1), response_id=None)
-        asyncio.run(hooks.on_llm_end(None, agent, response))
+        await hooks.on_llm_end(None, agent, response)
         context = (RunContextWrapper(context=None) if plain_context else
                    ToolContext(context=None, tool_call_id="call-1", tool_name="read_file", tool_arguments=call.arguments))
         tool = next(t for t in agent.tools if t.name == "read_file")
         result = {"status": "ok"} if plain_context else "PRIVATE_UNEXPECTED_TOOL_OUTPUT"
-        asyncio.run(hooks.on_tool_end(context, agent, tool, result))
+        await hooks.on_tool_end(context, agent, tool, result)
         raise AssertionError("The unexpected tool contract must stop the run")
 
-    monkeypatch.setattr(Runner, "run_sync", deliver_unexpected_result)
+    monkeypatch.setattr(Runner, "run", deliver_unexpected_result)
     path = tmp_path / "unexpected-tool.json"
     record = run_repository(FIXTURE, "检查订单", path)
     assert record["stop_reason"] == "tool_error" and record["error"]["type"] == "TypeError"
@@ -293,7 +297,7 @@ def test_failure_is_saved_and_never_mistaken_for_empty_search(monkeypatch, tmp_p
     import httpx
     from openai import APITimeoutError
 
-    def fail_search(*args, **kwargs):
+    async def fail_search(*args, **kwargs):
         if failure == "search_timeout":
             raise subprocess.TimeoutExpired("rg", 3, output="SECRET")
         raise OSError("SECRET")
@@ -305,7 +309,7 @@ def test_failure_is_saved_and_never_mistaken_for_empty_search(monkeypatch, tmp_p
     model = (TimeoutModel(responses=[answer("unused")]) if failure == "model_timeout" else
              ScriptedModel(responses=[request("search_code", {"keyword": "Order"}, 1)]))
     monkeypatch.setattr(model_module, "create_model", lambda: model)
-    monkeypatch.setattr(subprocess, "run", fail_search)
+    monkeypatch.setattr("repo_agent.tools.search_text", fail_search)
     output = tmp_path / "run.json"
     record = run_repository(FIXTURE, "检查订单", output)
     assert record["stop_reason"] == stop and record["error"]["type"]
@@ -346,9 +350,9 @@ def test_cancel_saves_record_and_releases_output_file(monkeypatch, tmp_path):
     from repo_agent.execution import run_repository
 
     monkeypatch.setattr(model_module, "create_model", lambda: ScriptedModel([]))
-    def interrupt(*args, **kwargs):
+    async def interrupt(*args, **kwargs):
         raise KeyboardInterrupt()
-    monkeypatch.setattr(Runner, "run_sync", interrupt)
+    monkeypatch.setattr(Runner, "run", interrupt)
     path = tmp_path / "cancelled.json"
     record = run_repository(FIXTURE, "check", path)
     assert record["stop_reason"] == "cancelled" and record["finished_at"]

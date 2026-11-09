@@ -1,5 +1,6 @@
 """Tools see a bounded, frozen text snapshot, never a model-selected directory."""
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -59,6 +60,25 @@ def snapshot_hash(sources: dict[str, str]) -> str:
     return source_hash(json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
 
 
+async def search_text(keyword: str, content: str):
+    process = await asyncio.create_subprocess_exec(
+        "rg", "--no-config", "--color", "never", "-n", "-F", "-m", "21", "--", keyword,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(content.encode()), timeout=3)
+        return process.returncode, stdout.decode()
+    except BaseException as exc:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.wait()
+        if isinstance(exc, TimeoutError):
+            raise subprocess.TimeoutExpired("rg", 3) from exc
+        raise
+
+
 def repository_tools(sources: dict[str, str]) -> list[Tool]:
     sources = sources.copy()
     snapshot_id = snapshot_hash(sources)
@@ -67,7 +87,7 @@ def repository_tools(sources: dict[str, str]) -> list[Tool]:
         return {"status": status, "scope": "snapshot_only", "snapshot_id": snapshot_id, **fields}
 
     @function_tool(failure_error_function=None)
-    def search_code(keyword: str) -> dict:
+    async def search_code(keyword: str) -> dict:
         """只搜索绑定快照的文件内容，不搜索文件名。不支持正则。空 matches 只说明内容无匹配，不能证明仓库没有文件或依赖。
         最多20处，每处最多500字符；truncated 表示还有命中，excerpt_truncated 表示该行片段不完整。缩小关键词或用 read_file 读上下文；查路径用 list_source_files。
         """
@@ -75,13 +95,10 @@ def repository_tools(sources: dict[str, str]) -> list[Tool]:
             return observation("invalid_keyword", matches=[])
         matches = []
         for path, content in sources.items():
-            result = subprocess.run(
-                ["rg", "--no-config", "--color", "never", "-n", "-F", "-m", "21", "--", keyword],
-                input=content, text=True, capture_output=True, timeout=3, check=False,
-            )
-            if result.returncode not in (0, 1):
+            returncode, stdout = await search_text(keyword, content)
+            if returncode not in (0, 1):
                 return observation("unavailable", matches=[], reason="search_failed")
-            for match in result.stdout.splitlines():
+            for match in stdout.splitlines():
                 number, _, text = match.partition(":")
                 matches.append({"path": path, "line": int(number), "text": text[:500],
                                 "excerpt_truncated": len(text) > 500, "sha256": source_hash(content)})

@@ -1,0 +1,30 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>研发 Agent · 只读调查</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,sans-serif;color:#18283d;background:#f4f7fb}*{box-sizing:border-box}main{max-width:1000px;margin:48px auto;padding:0 24px}h1{font-size:32px;margin-bottom:8px}.muted{color:#53647a}section{background:white;border:1px solid #dbe3ed;border-radius:14px;padding:24px;margin:20px 0}textarea,input{font:inherit;width:100%;padding:12px;border:1px solid #a7b6c9;border-radius:8px}button{font:inherit;padding:10px 18px;border:1px solid #2563eb;border-radius:8px;background:#2563eb;color:white;margin-top:12px;cursor:pointer}button.secondary{background:white;color:#244268}button:disabled{opacity:.5;cursor:default}.row{display:flex;gap:12px;flex-wrap:wrap}article{border-top:1px solid #dbe3ed;margin-top:16px;padding-top:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.6 ui-monospace,monospace;background:#f1f5fa;padding:12px}li{line-height:1.8}.state{font-weight:600;color:#244268}#error{color:#a32323}label{display:block;margin:8px 0}details{margin:12px 0}summary{cursor:pointer}
+</style>
+<main><p class="muted">企业研发 Agent / 本地只读调查</p><h1>提交问题，查看过程与依据</h1><p class="muted">回答和来源供审阅；业务接口使用合成演练数据。运行只保留在当前服务进程中。</p>
+<section><form id="submit"><label for="question">想确认什么？</label><textarea id="question" required maxlength="2000" rows="3">查询合成订单 o-999 的当前状态，只报告数据时点的状态，不推断过去原因。</textarea><button>开始调查</button></form><p id="error" role="alert"></p></section>
+<section><form id="attach"><label for="run-id">重新查看运行</label><input id="run-id" placeholder="粘贴运行编号" required><button class="secondary">连接进度</button></form></section><div id="runs"></div></main>
+<script>
+const terminal=new Set(['completed','failed','cancelled']);
+const labels={queued:'等待开始',running:'调查中',cancelling:'正在请求停止',completed:'执行结束',failed:'结果不可用',cancelled:'已停止'};
+const kinds={answer_for_review:'回答待审阅',needs_information:'信息不足',unavailable:'结果不可用'};
+const eventNames={queued:'运行已创建',running:'运行开始',model_started:'等待模型响应',tool_requested:'模型请求工具',tool_started:'工具开始执行',tool_finished:'工具已返回',cancel_requested:'取消已请求',completed:'执行结束',failed:'结果不可用',cancelled:'执行已停止'};
+const connections=new Map();
+async function api(url,options){let r=await fetch(url,options);if(!r.ok)throw Error('请求失败（'+r.status+'）');return r.json()}
+function showError(e){document.querySelector('#error').textContent=e.message}
+function node(tag,text){let n=document.createElement(tag);n.textContent=text;return n}
+async function watch(id){
+ if(connections.has(id))return;
+ const box=node('section','');box.append(node('h2','运行 '+id));const status=node('p','正在连接');status.className='state';const cancel=node('button','请求取消');cancel.className='secondary';box.append(status,cancel);const log=node('ol','');box.append(log);const result=node('article','');box.append(result);document.querySelector('#runs').prepend(box);
+ let es;async function refresh(){let run=await api('/runs/'+encodeURIComponent(id));status.textContent=labels[run.state]||run.state;cancel.disabled=terminal.has(run.state)||run.cancel_requested;
+ if(run.result){result.replaceChildren(node('h3',kinds[run.result.kind]||run.result.kind));if(run.result.conclusion)result.append(node('p',run.result.conclusion));if(run.result.facts?.length){let facts=node('ul','');for(let f of run.result.facts)facts.append(node('li',f.statement+' ['+f.source_ids.join(', ')+']'));result.append(facts)}if(run.result.gaps?.length)result.append(node('p','缺口：'+run.result.gaps.join('；')));if(run.result.kind!=='unavailable')result.append(node('p','来源关联经过程序检查，回答含义仍需审阅。'));let details=node('details','');details.append(node('summary','查看来源、检查与完整结果'),node('pre',JSON.stringify(run.result,null,2)));result.append(details)}
+ if(terminal.has(run.state)&&es){es.close();connections.delete(id)}return run}
+ cancel.onclick=async()=>{try{await api('/runs/'+id+'/cancel',{method:'POST'});await refresh()}catch(e){showError(e)}};
+ try{const run=await refresh();es=new EventSource('/runs/'+encodeURIComponent(id)+'/events');connections.set(id,es);es.onmessage=async e=>{let v=JSON.parse(e.data);log.append(node('li',(eventNames[v.kind]||v.kind)+(v.data.tool?' · '+v.data.tool:'')+(v.data.status?' · '+v.data.status:'')));if(terminal.has(v.kind)){es.close();connections.delete(id);try{await refresh()}catch(e){showError(e)}}};es.onerror=()=>{status.textContent='进度连接中断，可使用运行编号重新连接';es.close();connections.delete(id);refresh().catch(showError)}
+ }catch(e){showError(e);status.textContent='无法找到或读取运行'}
+}
+document.querySelector('#submit').onsubmit=async e=>{e.preventDefault();try{const r=await api('/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:document.querySelector('#question').value})});document.querySelector('#run-id').value=r.run_id;await watch(r.run_id)}catch(e){showError(e)}};
+document.querySelector('#attach').onsubmit=e=>{e.preventDefault();watch(document.querySelector('#run-id').value.trim()).catch(showError)};
+</script></html>

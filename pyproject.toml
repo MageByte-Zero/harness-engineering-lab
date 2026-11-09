@@ -8,11 +8,13 @@ version = "0.1.0"
 description = "Incremental repository-reading Agent application lab"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastapi>=0.162.2",
     "httpx[socks]>=0.28.1",
     "openai>=3.31.0",
     "openai-agents==0.24.0",
     "pydantic==2.12.5",
     "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -25,3 +27,6 @@ testpaths = ["tests"]
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.setuptools.package-data]
+repo_agent = ["templates/*.html"]

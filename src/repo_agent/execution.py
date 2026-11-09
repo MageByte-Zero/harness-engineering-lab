@@ -36,10 +36,10 @@ class ContextBudgetExceeded(RuntimeError):
     """The prepared SDK input exceeds the application's character budget."""
 
 
-def run_repository(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
+async def run_repository_async(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
                    retrieval_queries: tuple[str, ...] | None = None, business_client=None,
-                   structured_output: bool = False):
+                   structured_output: bool = False, run_id: str | None = None, emit=None):
     if structured_output and retrieval_queries is not None:
         raise ValueError('Structured answers currently use agent-selected tools, not fixed retrieval')
     if business_client is not None and (retrieval_queries is not None or business_client.observations):
@@ -55,7 +55,7 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
     if retrieval_queries is not None:
         validate_queries(retrieval_queries)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"run_id": str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
+    record = {"run_id": run_id or str(uuid4()), "started_at": datetime.now(timezone.utc).isoformat(),
               "runtime": "openai-agents", "event_format": "normalized-lifecycle-v1", "tool_contract_version": 2,
               "question": question, "task_id": task_id, "instructions": instructions, "events": [],
               "answer": None, "stop_reason": None, "error": None, "review": None, "tool_issues": [],
@@ -78,6 +78,11 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
         save()
         pending = set()
         phase = "input"
+        model = None
+
+        def publish(kind, **data):
+            if emit is not None:
+                emit(kind, data)
 
         class ObservationHooks(RunHooks):
             requested = 0
@@ -102,6 +107,7 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 save()
                 if blocked:
                     raise ContextBudgetExceeded()
+                publish("model_started", call_index=len(record["model_inputs"]))
 
             async def on_llm_end(self, context, agent, response):
                 calls, text = [], []
@@ -123,6 +129,7 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                     {"type": "ai", "content": "\n".join(text), "tool_calls": calls}]}})
                 for call in calls:
                     pending.add(call["id"])
+                    publish("tool_requested", call_id=call["id"], tool=call["name"])
                     print(f"[request] {call['id']} {call['name']} {call['args']}", flush=True)
                 self.requested += len(calls)
                 save()
@@ -131,6 +138,11 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 # SDK calls this hook before executing the returned batch.
                 if self.requested > TOOL_LIMIT:
                     raise ToolBudgetExceeded()
+
+            async def on_tool_start(self, context, agent, tool):
+                if not isinstance(context, ToolContext):
+                    raise TypeError("Expected tool-call context")
+                publish("tool_started", call_id=context.tool_call_id, tool=tool.name)
 
             async def on_tool_end(self, context, agent, tool, result):
                 if not isinstance(context, ToolContext) or not isinstance(result, dict):
@@ -147,6 +159,7 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                      "content": json.dumps(result, ensure_ascii=False)}]}})
                 print(f"[result] {context.tool_call_id} {tool.name}: {result.get('status')}", flush=True)
                 save()
+                publish("tool_finished", call_id=context.tool_call_id, tool=tool.name, status=result.get("status"))
 
         try:
             sources = load_source_bundle(repo) if isinstance(repo, dict) else load_sources(repo)
@@ -167,8 +180,8 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                     save()
 
                 save()
-                record['retrieval']['limited'] = asyncio.run(collect_fixed(
-                    sources, retrieval_queries, limit=TOOL_LIMIT, emit=retain))
+                record['retrieval']['limited'] = await collect_fixed(
+                    sources, retrieval_queries, limit=TOOL_LIMIT, emit=retain)
                 record['retrieval']['complete'] = True
                 sdk_input = fixed_input(question, record)
             phase = "model"
@@ -184,14 +197,14 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
             if retrieval_queries is not None:
                 agent.tools = []
             save()
-            result = Runner.run_sync(agent, sdk_input,
+            result = await Runner.run(agent, sdk_input,
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
             record["answer"] = (result.final_output.model_dump(mode='json') if structured_output
                                 else result.final_output)
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
                                      else ("no_observation" if business_client is not None else "no_source_read")
                                      if not hooks.read_observed else "no_answer")
-        except (Exception, KeyboardInterrupt) as exc:
+        except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
             if isinstance(exc, MaxTurnsExceeded):
                 stop = "model_budget_exhausted"
             elif isinstance(exc, ToolBudgetExceeded):
@@ -202,7 +215,7 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
                 stop = "model_timeout"
             elif isinstance(exc, subprocess.TimeoutExpired) or isinstance(exc.__cause__, subprocess.TimeoutExpired):
                 stop = "tool_timeout"
-            elif isinstance(exc, KeyboardInterrupt):
+            elif isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
                 stop = "cancelled"
             elif isinstance(exc, ModelBehaviorError):
                 stop = "model_error"
@@ -225,7 +238,14 @@ def run_repository(repo: Path | dict[str, Path], question: str, output_path: Pat
             if structured_output:
                 record['answer_checks'] = assess_answer(record)
             save()
+            if isinstance(model, model_module.ConfiguredModel):
+                await model.aclose()
     print("Stop:", record["stop_reason"], "Record:", output_path)
     if record["answer"]:
         print(json.dumps(record['answer'], ensure_ascii=False) if structured_output else record["answer"])
     return record
+
+
+def run_repository(*args, **kwargs):
+    """CLI adapter; services await the same async execution core directly."""
+    return asyncio.run(run_repository_async(*args, **kwargs))
