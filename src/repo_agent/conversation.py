@@ -15,6 +15,10 @@ CONVERSATION_INSTRUCTIONS = """
 """
 
 
+class ConversationScopeChanged(RuntimeError):
+    pass
+
+
 class ConversationBusy(RuntimeError):
     pass
 
@@ -24,6 +28,7 @@ class Conversation:
     conversation_id: str = field(default_factory=lambda: str(uuid4()))
     turns: list[dict] = field(default_factory=list)
     busy: bool = False
+    scope: dict = field(default_factory=dict)
 
     def select(self, *, max_turns=3, char_limit=24000):
         selected, size = [], 0
@@ -49,20 +54,32 @@ class Conversation:
 
 class ConversationWorker:
     """Bind resources once; a temporary SDK session cannot pollute committed history."""
-    def __init__(self, sources, *, business_url, business_token):
+    def __init__(self, sources, *, business_url, business_token, store=None):
         self.sources, self.business_url, self.business_token = sources, business_url, business_token
         self.source_hash = snapshot_hash(load_source_bundle(sources))
+        self.store = store
+        self.scope = {'source_hash': self.source_hash,
+            'sources': {k: str(v.resolve()) for k, v in sources.items()}, 'business_url': business_url}
+        self.pending_turns: dict[str, dict] = {}
         self.conversations: dict[str, Conversation] = {}
+        if store is not None:
+            for saved in store.load_conversations():
+                self.conversations[saved['id']] = Conversation(
+                    conversation_id=saved['id'], turns=saved['turns'], scope=saved['scope'])
 
     def create(self):
         if len(self.conversations) >= 32:
-            raise ValueError('Conversation capacity reached; restart for a fresh local session')
-        conversation = Conversation()
+            raise ValueError('Conversation capacity reached (32); use another data directory for a new local workspace')
+        conversation = Conversation(scope=self.scope)
+        if self.store is not None:
+            self.store.add_conversation(conversation.conversation_id, conversation.scope)
         self.conversations[conversation.conversation_id] = conversation
         return conversation
 
     def acquire(self, identity):
         conversation = self.conversations[identity]
+        if conversation.scope != self.scope:
+            raise ConversationScopeChanged('Bound resources changed; create a new conversation')
         if conversation.busy:
             raise ConversationBusy()
         conversation.busy = True
@@ -70,6 +87,8 @@ class ConversationWorker:
 
     async def __call__(self, question, output, *, conversation, run_id, emit):
         from repo_agent.application import investigate
+        if self.store is not None:
+            conversation.turns = await self.store.read_history(conversation.turns)
         selection = conversation.select()
         if snapshot_hash(load_source_bundle(self.sources)) != self.source_hash:
             raise ValueError('Bound sources changed; restart to bind a new conversation scope')
@@ -83,7 +102,12 @@ class ConversationWorker:
             if consume_answer(record)['kind'] != 'unavailable':
                 items = await session.get_items()
                 new_items = items[len(selection['history']):]
-                conversation.turns.append({'run_id':run_id, 'items':new_items})
+                turn = {'run_id': run_id, 'items': new_items}
+                if self.store is None:
+                    conversation.turns.append(turn)
+                else:
+                    turn.update(await self.store.write_history(run_id, new_items))
+                    self.pending_turns[run_id] = turn
             return record
         finally:
             session.close()

@@ -46,12 +46,17 @@ class ActiveRun:
 
 
 class RunManager:
-    """Single event loop, no queues or persistence; reject excess work explicitly."""
+    """Single event loop with optional durable records; reject excess work explicitly."""
     def __init__(self, directory: Path, worker, *, active_limit=2, retained_limit=64):
         self.directory, self.worker = directory, worker
         self.active_limit, self.retained_limit = active_limit, retained_limit
         self.runs: dict[str, ActiveRun] = {}
         self.closed = False
+        self.store = getattr(worker, 'store', None)
+        if self.store is not None:
+            for saved in self.store.load_runs():
+                run = ActiveRun(**saved['view'], events=saved['events'])
+                self.runs[run.run_id] = run
 
     def submit(self, question, *, conversation_id=None):
         question = question.strip()
@@ -62,21 +67,27 @@ class RunManager:
             raise CapacityExceeded()
         conversation = self.worker.acquire(conversation_id) if conversation_id else None
         run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id)
-        self.runs[run.run_id] = run
         run.emit('queued')
+        try:
+            if self.store is not None:
+                self.store.save_run(run.view(), run.events)
+        except Exception:
+            if conversation is not None:
+                conversation.busy = False
+            raise
+        self.runs[run.run_id] = run
         run.task = asyncio.create_task(self._execute(run, conversation))
         return run
 
     async def _execute(self, run, conversation=None):
-        if run.cancel_requested:
-            run.state = 'cancelled'
-            run.emit('cancelled')
-            if conversation is not None:
-                conversation.busy = False
-            return
-        run.state = 'running'
-        run.emit('running')
         try:
+            if run.cancel_requested:
+                run.state = 'cancelled'
+                return
+            run.state = 'running'
+            run.emit('running')
+            if self.store is not None:
+                self.store.save_run(run.view(), run.events)
             run.execution = asyncio.create_task(self.worker(run.question,
                 self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
                 **({"conversation":conversation} if conversation is not None else {})))
@@ -85,8 +96,10 @@ class RunManager:
             if selection:
                 run.context_selection = {k:v for k,v in selection.items() if k != "history"}
             run.result = consume_answer(record)
-            run.state = ('cancelled' if record['stop_reason'] == 'cancelled' else
+            run.state = ('cancelled' if run.cancel_requested or record['stop_reason'] == 'cancelled' else
                          'failed' if run.result['kind'] == 'unavailable' else 'completed')
+            if run.state == 'cancelled':
+                run.result = {'kind': 'unavailable', 'stop_reason': 'cancelled'}
         except asyncio.CancelledError:
             run.state = 'cancelled'
         except Exception as exc:
@@ -94,9 +107,25 @@ class RunManager:
             run.state = 'failed'
             run.result = {'kind': 'unavailable', 'error_type': type(exc).__name__}
         finally:
-            if conversation is not None:
-                conversation.busy = False
+            if self.store is None and conversation is not None and run.state != 'completed':
+                conversation.turns[:] = [t for t in conversation.turns if t['run_id'] != run.run_id]
             run.emit(run.state)
+            turn = getattr(self.worker, 'pending_turns', {}).pop(run.run_id, None)
+            try:
+                if self.store is not None:
+                    self.store.save_run(run.view(), run.events,
+                        turn=turn if run.state == 'completed' else None)
+                    if turn is not None and run.state == 'completed' and conversation is not None:
+                        conversation.turns.append(turn)
+            except Exception:
+                # Stop admission after a storage failure; restart reconciles from the durable index.
+                self.closed = True
+                run.state = 'failed'
+                run.result = {'kind': 'unavailable', 'error_type': 'PersistenceError'}
+                run.emit('failed')
+            finally:
+                if conversation is not None:
+                    conversation.busy = False
 
     def cancel(self, run):
         if run.state in ('queued', 'running'):

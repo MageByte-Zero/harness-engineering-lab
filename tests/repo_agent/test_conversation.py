@@ -228,3 +228,21 @@ def test_sdk_retains_repeated_reasoning_placeholder_items_across_turns(monkeypat
         assert len(c.turns)==2
         await manager.close()
     asyncio.run(scenario())
+
+
+def test_cancel_after_transient_worker_returns_does_not_keep_its_turn(monkeypatch, tmp_path):
+    async def scenario():
+        worker, manager, models = setup(monkeypatch, tmp_path)
+        identity = worker.create().conversation_id
+        original = ConversationWorker.__call__
+        async def cancel_at_return(self, *args, **kwargs):
+            record = await original(self, *args, **kwargs)
+            asyncio.get_running_loop().call_soon(manager.cancel, manager.runs[kwargs['run_id']])
+            return record
+        monkeypatch.setattr(ConversationWorker, '__call__', cancel_at_return)
+        run = manager.submit('状态', conversation_id=identity)
+        assert run.task is not None
+        await run.task
+        assert run.state == 'cancelled' and run.cancel_requested
+        assert worker.conversations[identity].turns == []
+    asyncio.run(scenario())

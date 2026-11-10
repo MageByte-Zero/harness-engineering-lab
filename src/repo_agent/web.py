@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from repo_agent.application import CapacityExceeded
-from repo_agent.conversation import ConversationBusy
+from repo_agent.conversation import ConversationBusy, ConversationScopeChanged
 
 
 class Submission(BaseModel):
@@ -37,16 +37,28 @@ def create_app(manager):
 
     def find(run_id):
         if run_id not in manager.runs:
-            raise HTTPException(404, 'Run not found in this process')
+            raise HTTPException(404, 'Run not found')
         return manager.runs[run_id]
 
     @app.get('/capabilities')
     async def capabilities():
-        return {'conversations':hasattr(manager.worker, 'create')}
+        return {'conversations':hasattr(manager.worker, 'create'), 'persistence':manager.store is not None}
 
     @app.get('/')
     def home():
         return FileResponse(Path(__file__).with_name('templates') / 'investigation.html')
+
+    @app.get('/conversations')
+    async def conversations():
+        return [{'conversation_id': c.conversation_id, 'turn_count': len(c.turns),
+                 'scope_matches': c.scope == manager.worker.scope}
+                for c in getattr(manager.worker, 'conversations', {}).values()]
+
+    @app.get('/conversations/{identity}/runs')
+    async def conversation_runs(identity: str):
+        if identity not in getattr(manager.worker, 'conversations', {}):
+            raise HTTPException(404, 'Conversation not found')
+        return [r.view() for r in manager.runs.values() if r.conversation_id == identity]
 
     @app.post('/conversations', status_code=201)
     async def new_conversation():
@@ -67,10 +79,12 @@ def create_app(manager):
             return manager.submit(body.question, conversation_id=body.conversation_id).view()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        except ConversationScopeChanged as exc:
+            raise HTTPException(409, 'Bound resources changed; create a new conversation') from exc
         except ConversationBusy as exc:
             raise HTTPException(409, 'This conversation already has an active run') from exc
         except CapacityExceeded as exc:
-            raise HTTPException(429, 'Run capacity reached; inspect existing runs or restart for a fresh session') from exc
+            raise HTTPException(429, 'Run capacity reached; inspect existing runs or use another local data directory') from exc
 
     @app.get('/runs/{run_id}')
     async def status(run_id: str):
@@ -99,7 +113,7 @@ def create_app(manager):
                 for event in run.events[cursor:]:
                     cursor = event['seq']
                     yield f"id: {cursor}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if run.state in ('completed', 'failed', 'cancelled'):
+                if run.state in ('completed', 'failed', 'cancelled', 'interrupted'):
                     return
                 await asyncio.sleep(0.1)
 
