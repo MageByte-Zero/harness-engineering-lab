@@ -17,6 +17,7 @@ import uvicorn
 from repo_agent.application import investigate, RunManager
 from repo_agent.output import consume_answer
 from repo_agent.web import create_app
+from repo_agent.conversation import ConversationWorker
 
 
 def main():
@@ -25,7 +26,11 @@ def main():
     parser.add_argument('--business-port', type=int, default=8765)
     parser.add_argument('--question', help='CLI mode; runs the same investigation use case')
     parser.add_argument('--business-mode', choices=['normal', 'forbidden', 'slow'], default='normal')
+    parser.add_argument('--conversation', action='store_true', help='Enable process-local multi-turn conversations')
+    parser.add_argument('--follow-up', action='append', default=[], help='CLI follow-up; requires --conversation and --question')
     args = parser.parse_args()
+    if args.follow_up and not (args.conversation and args.question):
+        parser.error('--follow-up requires --conversation and --question')
     if (not 1024 <= args.port <= 65535 or not 1024 <= args.business_port <= 65535
             or args.port == args.business_port):
         parser.error('Choose different unprivileged ports')
@@ -64,12 +69,22 @@ def main():
                 raise RuntimeError('Synthetic service did not become ready')
             worker = partial(investigate, {'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
                              business_url=url, business_token=token)
+            if args.conversation:
+                worker = ConversationWorker({'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
+                    business_url=url, business_token=token)
             print('Run logs:', directory, flush=True)
             if args.question:
-                record = asyncio.run(worker(args.question, directory / 'cli.json'))
-                result = consume_answer(record)
-                print(json.dumps(result, ensure_ascii=False, indent=2))
-                if result['kind'] == 'unavailable':
+                async def execute_questions():
+                    conversation = worker.create() if isinstance(worker, ConversationWorker) else None
+                    for index, question in enumerate([args.question, *args.follow_up], 1):
+                        options = {'conversation':conversation, 'run_id':str(uuid4()), 'emit':lambda *a: None} if conversation else {}
+                        record = await worker(question, directory / (f'cli-{index}.json' if conversation else 'cli.json'), **options)
+                        result = consume_answer(record)
+                        print(json.dumps(result, ensure_ascii=False, indent=2))
+                        if result['kind'] == 'unavailable':
+                            return 1
+                    return 0
+                if asyncio.run(execute_questions()):
                     raise SystemExit(1)
             else:
                 uvicorn.run(create_app(RunManager(directory, worker)), host='127.0.0.1', port=args.port)

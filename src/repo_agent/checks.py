@@ -97,7 +97,7 @@ def check_record(record):
                     result = json.loads(message["content"])
                     if 'output_contract' in record:
                         observation_count += 1
-                        if result.get('observation_id') != f'obs-{observation_count}':
+                        if result.get('observation_id') != f"{record.get('observation_prefix', '')}obs-{observation_count}":
                             errors.append('observation_identity')
                     # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
                     if call_id is not None:
@@ -195,7 +195,10 @@ def check_record(record):
                 if fixed:
                     expected_tools = []
                 expected_input = (fixed_input(record['question'], record) if fixed else
-                                  [{'role': 'user', 'content': record['question']}])
+                                  [{'role': 'user', 'content': record.get('conversation', {}).get('current_input', record['question'])}])
+                history = record.get("conversation", {}).get("history", [])
+                if history:
+                    expected_input = history + expected_input
                 decisions = []
                 for index, snapshot in enumerate(snapshots, 1):
                     payload = snapshot["payload"]
@@ -210,12 +213,15 @@ def check_record(record):
                             or payload["tools"] != expected_tools
                             or (index == 1 and items != expected_input)
                             or [i for i in items if i.get("role") == "user"]
-                            != expected_input):
+                            != [i for i in expected_input if i.get("role") == "user"]):
                         errors.append("context_input")
                     if 'output_contract' in record:
                         from repo_agent.output import output_contract
                         if payload.get('output_schema') != output_contract():
                             errors.append('context_output_schema')
+                    if items[:len(history)] != history:
+                        errors.append("conversation_history")
+                    items = items[len(history):]
                     expected = {c["id"]: c for batch in call_batches[:index - 1] for c in batch}
                     calls = [i for i in items if i.get("type") == "function_call"]
                     outputs = [i for i in items if i.get("type") == "function_call_output"]

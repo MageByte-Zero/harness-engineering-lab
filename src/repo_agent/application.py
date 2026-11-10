@@ -10,9 +10,10 @@ from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
 
 
-async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None):
+async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None):
     # Each attempt owns a new client and observation ledger. No HTTP request selects resources.
     return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
+        session=session, conversation=conversation,
         instructions=BUSINESS_INSTRUCTIONS, business_client=BusinessClient(business_url, business_token),
         structured_output=True)
 
@@ -31,6 +32,8 @@ class ActiveRun:
     task: asyncio.Task | None = field(default=None, repr=False)
     execution: asyncio.Task | None = field(default=None, repr=False)
     cancel_requested: bool = False
+    conversation_id: str | None = None
+    context_selection: dict | None = None
 
     def emit(self, kind, data=None):
         self.events.append({'seq': len(self.events) + 1, 'run_id': self.run_id,
@@ -38,7 +41,8 @@ class ActiveRun:
 
     def view(self):
         return {'run_id': self.run_id, 'question': self.question, 'state': self.state,
-                'cancel_requested': self.cancel_requested, 'result': self.result}
+                'cancel_requested': self.cancel_requested, 'result': self.result,
+                'conversation_id': self.conversation_id, 'context_selection': self.context_selection}
 
 
 class RunManager:
@@ -49,30 +53,37 @@ class RunManager:
         self.runs: dict[str, ActiveRun] = {}
         self.closed = False
 
-    def submit(self, question):
+    def submit(self, question, *, conversation_id=None):
         question = question.strip()
         if not 1 <= len(question) <= 2000:
             raise ValueError('Question must contain 1–2000 characters')
         if (self.closed or len(self.runs) >= self.retained_limit or
                 sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
             raise CapacityExceeded()
-        run = ActiveRun(str(uuid4()), question)
+        conversation = self.worker.acquire(conversation_id) if conversation_id else None
+        run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id)
         self.runs[run.run_id] = run
         run.emit('queued')
-        run.task = asyncio.create_task(self._execute(run))
+        run.task = asyncio.create_task(self._execute(run, conversation))
         return run
 
-    async def _execute(self, run):
+    async def _execute(self, run, conversation=None):
         if run.cancel_requested:
             run.state = 'cancelled'
             run.emit('cancelled')
+            if conversation is not None:
+                conversation.busy = False
             return
         run.state = 'running'
         run.emit('running')
         try:
             run.execution = asyncio.create_task(self.worker(run.question,
-                self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit))
+                self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
+                **({"conversation":conversation} if conversation is not None else {})))
             record = await run.execution
+            selection = record.get("conversation")
+            if selection:
+                run.context_selection = {k:v for k,v in selection.items() if k != "history"}
             run.result = consume_answer(record)
             run.state = ('cancelled' if record['stop_reason'] == 'cancelled' else
                          'failed' if run.result['kind'] == 'unavailable' else 'completed')
@@ -83,6 +94,8 @@ class RunManager:
             run.state = 'failed'
             run.result = {'kind': 'unavailable', 'error_type': type(exc).__name__}
         finally:
+            if conversation is not None:
+                conversation.busy = False
             run.emit(run.state)
 
     def cancel(self, run):

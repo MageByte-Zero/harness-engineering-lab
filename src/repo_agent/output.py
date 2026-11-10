@@ -44,7 +44,7 @@ def output_contract():
             'reset_tool_choice': True}
 
 
-def with_observation_ids(tools):
+def with_observation_ids(tools, *, prefix=""):
     """Put citation IDs inside tool content, before the SDK serializes it for the model."""
     count = 0
 
@@ -55,7 +55,7 @@ def with_observation_ids(tools):
             if not isinstance(result, dict):
                 raise TypeError('Observation IDs require dictionary tools')
             count += 1
-            return {**result, 'observation_id': f'obs-{count}'}
+            return {**result, 'observation_id': f'{prefix}obs-{count}'}
         return call
 
     return [replace(tool, on_invoke_tool=observed(tool.on_invoke_tool)) for tool in tools]

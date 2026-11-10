@@ -39,7 +39,7 @@ class ContextBudgetExceeded(RuntimeError):
 async def run_repository_async(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
                    retrieval_queries: tuple[str, ...] | None = None, business_client=None,
-                   structured_output: bool = False, run_id: str | None = None, emit=None):
+                   structured_output: bool = False, run_id: str | None = None, emit=None, session=None, conversation=None):
     if structured_output and retrieval_queries is not None:
         raise ValueError('Structured answers currently use agent-selected tools, not fixed retrieval')
     if business_client is not None and (retrieval_queries is not None or business_client.observations):
@@ -62,6 +62,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
               "context_format": "sdk-input-v1", "context_char_limit": context_char_limit, "model_inputs": [],
               "python": platform.python_version(),
               "versions": {p: version(p) for p in ("openai-agents", "openai", "pydantic")}}
+    if conversation is not None:
+        record['conversation'] = conversation
+        record['observation_prefix'] = record['run_id'] + '/'
     if structured_output:
         record['output_contract'] = output_contract()
     # Reserve before calling a paid API; a typo must not overwrite a previous run.
@@ -166,6 +169,11 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
             record["sources"] = {p: {"sha256": source_hash(c), "content": c} for p, c in sources.items()}
             hooks = ObservationHooks()
             sdk_input = question
+            if conversation is not None:
+                from repo_agent.conversation import CONVERSATION_INSTRUCTIONS
+                if conversation["history"] or conversation["omitted_turns"]:
+                    sdk_input += CONVERSATION_INSTRUCTIONS + f"\n已省略历史轮数：{conversation['omitted_turns']}"
+                conversation["current_input"] = sdk_input
             if retrieval_queries is not None:
                 phase = 'retrieval'
                 record['retrieval'] = {'strategy': 'fixed', 'queries': list(retrieval_queries),
@@ -193,12 +201,12 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
             from repo_agent.business import business_tools
             extra_tools = business_tools(business_client) if business_client is not None else []
             agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools,
-                                structured_output=structured_output)
+                                structured_output=structured_output, observation_prefix=record.get("observation_prefix", ""))
             if retrieval_queries is not None:
                 agent.tools = []
             save()
             result = await Runner.run(agent, sdk_input,
-                max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True))
+                max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True), session=session)
             record["answer"] = (result.final_output.model_dump(mode='json') if structured_output
                                 else result.final_output)
             record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
