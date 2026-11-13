@@ -39,7 +39,8 @@ class ContextBudgetExceeded(RuntimeError):
 async def run_repository_async(repo: Path | dict[str, Path], question: str, output_path: Path, *, task_id=None,
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
                    retrieval_queries: tuple[str, ...] | None = None, business_client=None,
-                   structured_output: bool = False, run_id: str | None = None, emit=None, session=None, conversation=None):
+                   structured_output: bool = False, run_id: str | None = None, emit=None, session=None, conversation=None,
+                   skills=None):
     if structured_output and retrieval_queries is not None:
         raise ValueError('Structured answers currently use agent-selected tools, not fixed retrieval')
     if business_client is not None and (retrieval_queries is not None or business_client.observations):
@@ -48,6 +49,8 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
         raise ValueError("Question must not be empty")
     if not instructions.strip():
         raise ValueError("Instructions must not be empty")
+    if skills is not None:
+        instructions += skills.instructions()
     if structured_output:
         instructions += OUTPUT_INSTRUCTIONS
     if context_char_limit <= 0:
@@ -67,6 +70,8 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
         record['observation_prefix'] = record['run_id'] + '/'
     if structured_output:
         record['output_contract'] = output_contract()
+    if skills is not None:
+        record['skills'] = {**skills.record(), 'loads': []}
     # Reserve before calling a paid API; a typo must not overwrite a previous run.
     with output_path.open("x", encoding="utf-8") as output:
         def save():
@@ -151,6 +156,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 if not isinstance(context, ToolContext) or not isinstance(result, dict):
                     raise TypeError("Repository tools require a tool-call context and a dictionary result")
                 pending.discard(context.tool_call_id)
+                if result.get('scope') == 'skill_method' and result.get('status') == 'ok' and not result.get('already_loaded'):
+                    record['skills']['loads'].append({'call_id': context.tool_call_id,
+                        **{k: result[k] for k in ('name', 'path', 'sha256')}})
                 self.read_observed |= (tool.name == "read_file" or
                     (business_client is not None and tool.name in ("get_order_status", "get_order_events")
                      and result.get("scope") == "business_readonly")) and result.get("status") == "ok"
@@ -167,6 +175,8 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
         try:
             sources = load_source_bundle(repo) if isinstance(repo, dict) else load_sources(repo)
             record["sources"] = {p: {"sha256": source_hash(c), "content": c} for p, c in sources.items()}
+            if skills is not None:
+                skills.check_unchanged()
             hooks = ObservationHooks()
             sdk_input = question
             if conversation is not None:
@@ -200,6 +210,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 "model_limit": MODEL_LIMIT, "tool_limit": TOOL_LIMIT, "remote_tracing": False}
             from repo_agent.business import business_tools
             extra_tools = business_tools(business_client) if business_client is not None else []
+            if skills is not None:
+                from repo_agent.skills import SkillRun, skill_tools
+                extra_tools.extend(skill_tools(SkillRun(skills)))
             agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools,
                                 structured_output=structured_output, observation_prefix=record.get("observation_prefix", ""))
             if retrieval_queries is not None:

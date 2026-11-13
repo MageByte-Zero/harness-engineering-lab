@@ -21,6 +21,7 @@ from repo_agent.output import consume_answer
 from repo_agent.web import create_app
 from repo_agent.conversation import ConversationWorker
 from repo_agent.persistence import LocalStore
+from repo_agent.skills import SkillLibrary
 
 
 def main():
@@ -33,7 +34,9 @@ def main():
     parser.add_argument('--follow-up', action='append', default=[], help='CLI follow-up; requires --conversation and --question')
     parser.add_argument('--data-dir', type=Path, help='Persistent local directory; requires --conversation, single process only')
     parser.add_argument('--conversation-id', help='Resume an existing conversation in persistent CLI mode')
+    parser.add_argument('--skills-dir', type=Path, help='Trusted local read-only method packages; no script execution')
     args = parser.parse_args()
+    skills = SkillLibrary(args.skills_dir) if args.skills_dir else None
     if args.data_dir and not args.conversation:
         parser.error('--data-dir requires --conversation')
     if args.conversation_id and not (args.data_dir and args.question):
@@ -85,10 +88,10 @@ def main():
                 else:
                     raise RuntimeError('Synthetic service did not become ready')
                 worker = partial(investigate, {'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
-                                 business_url=url, business_token=token)
+                                 business_url=url, business_token=token, skills=skills)
                 if args.conversation:
                     worker = ConversationWorker({'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
-                        business_url=url, business_token=token, store=store)
+                        business_url=url, business_token=token, store=store, skills=skills)
                 print('Run logs:', directory, flush=True)
                 manager = RunManager(directory, worker)
                 if args.question:

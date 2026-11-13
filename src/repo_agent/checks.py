@@ -59,6 +59,10 @@ def check_record(record):
     prepared_inputs, blocked_inputs = None, 0
     api_reads, api_observations, observation_count = 0, [], 0
     try:
+        method_state, method_loads = None, []
+        if 'skills' in record:
+            from repo_agent.skills import SkillLibrary, SkillRun
+            method_state = SkillRun(SkillLibrary.from_record(record['skills']))
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
             errors.append("snapshot_hash")
@@ -102,6 +106,19 @@ def check_record(record):
                     # SDK 0.24.0 serializes this app's dictionary results with str(), not JSON.
                     if call_id is not None:
                         tool_outputs[call_id] = str(result)
+                    if message['name'] in ('load_skill', 'read_skill_resource'):
+                        if method_state is None:
+                            errors.append('skill_observation')
+                            continue
+                        expected = method_state.read(call['args']['name'],
+                            'SKILL.md' if message['name'] == 'load_skill' else call['args']['path'],
+                            resource_only=message['name'] == 'read_skill_resource')
+                        if {k: v for k, v in result.items() if k != 'observation_id'} != expected:
+                            errors.append('skill_observation')
+                        if result['status'] == 'ok' and not result['already_loaded']:
+                            method_loads.append({'call_id': call_id,
+                                **{k: result[k] for k in ('name', 'path', 'sha256')}})
+                        continue
                     if message['name'] in ('get_order_status', 'get_order_events'):
                         from repo_agent.business import validate_data
                         business = record['business']
@@ -192,6 +209,11 @@ def check_record(record):
                     expected_tools.extend({"name": t.name, "description": t.description,
                         "parameters": t.params_json_schema, "strict": t.strict_json_schema}
                         for t in business_tools(BusinessClient('http://127.0.0.1', 'offline-check')))
+                if method_state is not None:
+                    from repo_agent.skills import skill_tools
+                    expected_tools.extend({'name': t.name, 'description': t.description,
+                        'parameters': t.params_json_schema, 'strict': t.strict_json_schema}
+                        for t in skill_tools(method_state))
                 if fixed:
                     expected_tools = []
                 expected_input = (fixed_input(record['question'], record) if fixed else
@@ -247,6 +269,8 @@ def check_record(record):
         if 'business' in record and sorted(json.dumps(x, sort_keys=True) for x in api_observations) != sorted(
                 json.dumps(x, sort_keys=True) for x in record['business']['observations']):
             errors.append('api_observation_ledger')
+        if method_state is not None and method_loads != record['skills']['loads']:
+            errors.append('skill_load_ledger')
         if not record.get("finished_at") or not record.get("stop_reason"):
             errors.append("unfinished_record")
         if record["stop_reason"] == "answer_returned":

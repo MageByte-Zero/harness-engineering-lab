@@ -10,10 +10,10 @@ from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
 
 
-async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None):
+async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None):
     # Each attempt owns a new client and observation ledger. No HTTP request selects resources.
     return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
-        session=session, conversation=conversation,
+        session=session, conversation=conversation, skills=skills,
         instructions=BUSINESS_INSTRUCTIONS, business_client=BusinessClient(business_url, business_token),
         structured_output=True)
 
