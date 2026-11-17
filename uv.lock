@@ -722,6 +722,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx", extra = ["socks"] },
+    { name = "mcp" },
     { name = "openai" },
     { name = "openai-agents" },
     { name = "pydantic" },
@@ -739,6 +740,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.162.2" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
+    { name = "mcp", specifier = "==2.3.0" },
     { name = "openai", specifier = ">=3.31.0" },
     { name = "openai-agents", specifier = "==0.24.0" },
     { name = "pydantic", specifier = "==2.12.5" },

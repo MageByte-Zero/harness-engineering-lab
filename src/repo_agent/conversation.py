@@ -54,13 +54,16 @@ class Conversation:
 
 class ConversationWorker:
     """Bind resources once; a temporary SDK session cannot pollute committed history."""
-    def __init__(self, sources, *, business_url, business_token, store=None, skills=None):
+    def __init__(self, sources, *, business_url, business_token, store=None, skills=None, business_transport="http"):
         self.sources, self.business_url, self.business_token = sources, business_url, business_token
         self.source_hash = snapshot_hash(load_source_bundle(sources))
         self.store = store
         self.skills = skills
+        self.business_transport = business_transport
         self.scope = {'source_hash': self.source_hash,
             'sources': {k: str(v.resolve()) for k, v in sources.items()}, 'business_url': business_url}
+        if business_transport == 'mcp':
+            self.scope['business_transport'] = 'business-mcp-stdio-v1'
         if skills is not None:
             self.scope['skills_hash'] = skills.snapshot_id
         self.pending_turns: dict[str, dict] = {}
@@ -100,7 +103,7 @@ class ConversationWorker:
             await session.add_items(selection['history'])
             record = await investigate(self.sources, question, output, business_url=self.business_url,
                 business_token=self.business_token, run_id=run_id, emit=emit,
-                session=session, conversation=selection, skills=self.skills)
+                session=session, conversation=selection, skills=self.skills, business_transport=self.business_transport)
             from repo_agent.output import consume_answer
             if consume_answer(record)['kind'] != 'unavailable':
                 items = await session.get_items()

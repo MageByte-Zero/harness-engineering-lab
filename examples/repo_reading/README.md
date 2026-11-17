@@ -2,6 +2,8 @@
 
 对应课程修订 `2026-10-25-openai-agents-sdk`，使用 OpenAI Agents SDK 0.24.0。本目录是唯一课程运行入口，共用 `src/repo_agent/` 的应用源码；第 4、5 讲共用同一实现，固定版本入口由下方标签和文章给出。读者按文章给出的固定 commit 获取同一份源码。旧示例已从当前工作区移除，历史标签与查看方式见[仓库说明](../../README.md#历史版本与仓库边界)。
 
+> 当前完整只读应用已包含页面/CLI、会话持久化、任务方法和 MCP，统一入口为 `12_app.py`；使用[根仓库说明](../../README.md)及[第16讲说明](16_README.md)。下文继续保留第4–9讲的阶段用法。
+
 ## 准备
 
 在仓库根目录运行，需要 Python 3.12、uv 与 ripgrep（`rg --version`）。模型资源必须支持 Chat Completions 工具调用。根目录 `.env` 使用现有 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`，参考 `.env.example`；不把密钥写进命令、源码或结果文件。

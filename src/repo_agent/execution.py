@@ -83,6 +83,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
 
         if business_client is not None:
             record["business"] = {"contract": "business-readonly-v1", "allowed_orders": sorted(business_client.allowed_orders), "observations": business_client.observations}
+        if business_client is not None and hasattr(business_client, 'catalog'):
+            record['mcp'] = {'contract': 'business-mcp-stdio-v1', 'transport': 'stdio',
+                             'tools': business_client.catalog}
         save()
         pending = set()
         phase = "input"

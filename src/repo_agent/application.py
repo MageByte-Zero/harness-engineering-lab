@@ -10,12 +10,19 @@ from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
 
 
-async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None):
-    # Each attempt owns a new client and observation ledger. No HTTP request selects resources.
-    return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
-        session=session, conversation=conversation, skills=skills,
-        instructions=BUSINESS_INSTRUCTIONS, business_client=BusinessClient(business_url, business_token),
-        structured_output=True)
+async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http"):
+    async def execute(client):
+        return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
+            session=session, conversation=conversation, skills=skills,
+            instructions=BUSINESS_INSTRUCTIONS, business_client=client, structured_output=True)
+    if business_transport == 'mcp':
+        from repo_agent.mcp_business import MCPBusinessClient
+        async with MCPBusinessClient(business_url, business_token) as client:
+            return await execute(client)
+    if business_transport != 'http':
+        raise ValueError('Unknown business transport')
+    return await execute(BusinessClient(business_url, business_token))
+
 
 
 class CapacityExceeded(RuntimeError):

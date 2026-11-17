@@ -1,72 +1,79 @@
 # AI Agent 应用实战：配套代码
 
-本仓库面向有 Java、Go 或 Python 基础的后端开发者，使用 Python 与现成开源组件逐步实现企业研发 Agent 及应用级 Harness，训练可迁移的工具、上下文、状态、工作流和验证能力。教学输入独立编写，不包含公司源码或真实客户数据。
+使用 Python 和 OpenAI Agents SDK 持续开发同一个企业研发 Agent。面向有 Java、Go 或 Python 基础的后端开发者；源码、规程、业务 HTTP 服务都是独立编写的合成教学输入，不包含公司代码或客户数据。
 
-## 唯一应用：企业研发 Agent（当前为只读核心）
+## 当前实现
 
-第 4–6 讲当前实现对应 `2026-10-25-openai-agents-sdk`。课程当前规划继续扩展为理解、设计、受控开发与测试；现有源码仍是只读核心：复用 OpenAI Agents SDK 的 `Agent` 和 `Runner`，在固定源码快照内列举路径、搜索、读取并解释订单查询功能。
+第 16 讲固定入口为 `lesson-16-mcp-20261117`。当前应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
 
-**应用源码在 `src/repo_agent/`，运行入口在 [examples/repo_reading](examples/repo_reading/README.md)。** 后续讲次继续扩展这一应用，不复制成新的项目目录。
+这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。当前仍只读：不修改源码、不执行业务写动作，不具备用户身份授权、人工审批、隔离执行、外部副作用恢复或生产部署能力。
 
-```text
-harness-engineering-lab/
-├── src/repo_agent/          # 唯一应用包
-│   ├── agent.py            # 任务指令、工具与框架循环的组装
-│   ├── execution.py        # 一次运行的生命周期、预算结果与事件留存
-│   ├── tools.py            # 有界源码快照、路径清单、搜索与读取
-│   ├── model.py            # 模型客户端与 MODEL_* 配置
-│   └── checks.py           # 离线记录核对，不承担答案语义验收
-├── examples/repo_reading/   # 薄 CLI、固定任务与独立人工参考
-├── fixtures/               # 正常输入、缺资料输入；均为合成源码
-└── tests/repo_agent/        # 当前应用的边界与框架回归测试
-```
+| 源文件 | 当前职责 |
+| --- | --- |
+| `agent.py`、`model.py` | 指令与工具组装；MODEL_* 客户端配置 |
+| `execution.py` | SDK 往返、预算、实际模型输入和工具事件留存 |
+| `tools.py`、`retrieval.py` | 限定文本快照的读取、搜索和固定/按需取材 |
+| `business.py`、`mcp_business.py` | 合成业务 HTTP 客户端、只读工具及固定 MCP 适配 |
+| `output.py`、`checks.py` | 结构化结果、来源关联和离线记录核对 |
+| `application.py`、`web.py` | 用例与 Run 状态；FastAPI、SSE 和取消接口 |
+| `conversation.py`、`persistence.py` | 完整轮次选择/提交、SQLite 存储、重启与范围校验 |
+| `skills.py` | 受信本地任务方法包的按需加载和内容版本绑定 |
 
-`fixtures/order-service` 与 `fixtures/order-service-missing` 是不同验收输入，需要同时保留。`runs/` 是运行时生成的本地记录，不提交 Git。模型配置填写在根目录 `.env`；`.env.example` 仅为公开空值模板，程序不会自动读取它。
+包内有 15 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出，不是另一套应用。
 
-第 4–5 讲 SDK 版固定入口为 `lesson-04-sdk-20261025` 与 `lesson-05-sdk-20261025`；两讲共用同一代码版本。完整命令、限制和独立参考见上述运行说明。69d2233 对应迁移前的 LangChain 原始运行，历史标签和证据保持原义。
+## 获取固定版本与最小运行
 
-第 5 讲沿用同一个 Agent，增加四条固定任务、停止原因分类和离线记录检查；入口 `examples/repo_reading/05_tasks.py`，判定参考与源码输入分开。运行与复现命令见同目录 README；尚未发布 `lesson-05-v2` 标签。
-
-第 6 讲固定入口为 `lesson-06-tools-20261025`，沿同一应用完善工具契约：`list_source_files` 只列绑定快照的路径，所有工具结果带 `scope: snapshot_only` 和 `snapshot_id`；读取另给出字符截断与行段续读信息。离线检查支持这些字段及旧版记录。复现步骤与比较边界见[第6讲说明](examples/repo_reading/README.md#第-6-讲工具契约与快照路径)。
-
-## 获取与运行
+需要 Git、Python 3.12、uv、ripgrep。第一次获取：
 
 ```bash
-git clone https://github.com/MageByte-Zero/harness-engineering-lab.git
+git clone --branch lesson-16-mcp-20261117 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
-uv sync --frozen
 ```
 
-使用 Python 3.12、uv 和 ripgrep。在上述仓库根目录执行 `cp -n .env.example .env`，然后用编辑器填写 `.env` 的 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`；已有 `.env` 不要覆盖。三个值来自模型服务控制台或企业网关管理员。真实Key不提交，完整配置步骤、四条任务及判定说明见 [仓库阅读 Agent](examples/repo_reading/README.md#准备)。
+已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-16-mcp-20261117` 和 `git switch --detach lesson-16-mcp-20261117`。已发布标签保持原义，后续修订使用新标签。
 
-## 后续架构与分包约定
+在根目录 `.env` 或进程环境配置 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。`.env.example` 是空值模板，程序不读取模板；已有 `.env` 不要覆盖，密钥不提交也不写进命令。模型需支持 Chat Completions 工具调用和本讲的结构化输出组合，标识 `auto` 不保证服务端模型身份稳定。
 
-当前执行器还保留每次 SDK 模型调用前的输入，并支持 `--context-char-limit`（默认60000字符）：超限在调用前停止，原始工具结果保留。计数不是模型 token 数，记录和真实回答仍分别验收。合成规程任务 `closure-policy`、运行命令与字段说明见[输入记录与体量限制](examples/repo_reading/README.md#模型输入记录与体量限制)。
+在已经配置好的仓库根目录，一条命令完成合成 HTTP 服务启动、真实 MCP 连接和 Agent 查询；`uv run --frozen` 会按锁文件安装依赖：
 
-目前代码规模适合单包内按模块分工。后续按入口、应用用例、Agent 定义、运行时、工具、基础设施逐步分包；实际新增对应能力时才创建目录。业务流程决定任务何时接受或交付，运行时负责模型与工具循环，模型 SDK 只处理模型通信。工具授权由程序检查，执行隔离由执行环境落实，不能仅靠提示词。
+```bash
+uv run --frozen python examples/repo_reading/12_app.py \
+  --business-transport mcp --conversation --data-dir runs/mcp-agent \
+  --port 18040 --business-port 18800 \
+  --question '查询o-999数据时点的状态，不推断过去原因。'
+```
 
-CLI/API 复用同一应用用例；运行时产生可关联的事件供入口展示和记录；离线检查与语义验收保持独立。会话/运行/事件、上下文装配、取消/预算及持久化按具体课程需求加入。Claude Agent SDK 或 Codex 的集成属于运行时接入，不能当作换一个模型 URL；不预建多运行时抽象，不同时维护多套循环。
+端口需空闲。命令打印 `Conversation:`、`Run:` 和最终结果；运行 JSON 位于所选目录的 `records/`。MCP 只改变业务工具的调用路径，仍需核对数据时点和事实引用。模型/API 不可用时记录原始停止原因，不手工补答案冒充通过。
 
-设计借鉴 [Claude Code 的循环与上下文管理](https://code.claude.com/docs/en/how-claude-code-works)、[Codex 的客户端接口及 Thread/Turn/Item](https://developers.openai.com/codex/app-server) 和 [审批与隔离的区分](https://learn.chatgpt.com/docs/agent-approvals-security#sandbox-and-approvals)。上述分包是本项目的工程取舍，不声称是两者的内部源码结构。具体新增约束见 [AGENTS.md](AGENTS.md)。
+去掉 `--question` 就启动同一网页应用，打开 http://127.0.0.1:18040。`--conversation-id ID` 延续已保存会话；`--skills-dir fixtures/skills` 启用按需方法；`--business-transport http` 使用直接 HTTP 路径。切换业务端点、HTTP/MCP 模式或方法内容时，需要遵守会话范围检查，旧结果仍可查看。停止旧进程后再复用端口。
 
-## 历史版本与仓库边界
+权限失败的复现与观察点见[第16讲运行说明](examples/repo_reading/16_README.md)。它返回不可用结果时，CLI 退出 1 是预期的失败路径，不意味着订单不存在。
 
-当前工作区已移除早期 `examples/lesson04`、`examples/lesson05`、`examples/v2`、`src/team_harness`、`src/support_agent` 及其专属服务、数据和测试。旧代码保留在 Git 历史，不另建归档目录。历史 `lesson-04`、`lesson-05` 标签含义不变；TaskHub 可查 [5f865ee 快照](https://github.com/MageByte-Zero/harness-engineering-lab/tree/5f865ee49f7f706a4f3a26346beff35322b73018)，清理前的仓库阅读 Agent 可查 [69d2233 快照](https://github.com/MageByte-Zero/harness-engineering-lab/tree/69d2233deea0a7c5a637d45f4ce171cf18962c2a)。使用独立 checkout 查阅旧版，避免混用旧入口与当前依赖。
+## 验证与限制
 
-本仓库仅承载源码、测试、独立合成输入、配置示例和复现说明。付费文稿、研究笔记、配图和运行交付记录留在私有文稿仓库；密钥、公司源码和真实业务数据不提交。完整应用的 API、会话、授权和部署仍是后续课程增量。
+```bash
+uv run --frozen python -m pytest -q
+uv run --frozen python examples/repo_reading/05_check.py runs/mcp-agent/records/RUN_ID.json
+```
 
-## 文件位置与新功能约束
+第二条的 `RUN_ID` 换成实际编号。测试中真实协议/HTTP、可控模型及故障注入各有明确边界；测试通过不代表任意真实模型都会选对工具，来源关联通过也不是自动语义批准。实际输入默认最多 60,000 字符，非 token 数；模型/工具预算分别为 12/16。
 
-本仓库是唯一教学实现位置。程序、依赖、合成输入和测试不在 pay-columns、research-notes 或 experiments 中开发；付费正文、提纲、配图和研究记录不复制到这里。具体位置与创建前检查见 AGENTS.md。
+持久化为本地单进程工作区，最多 32 个会话、64 次保留运行、2 个活动 Run。重启不重置容量；旧的未完成运行标记中断，不自动重放工具。尚无归档、多 worker、共享存储部署或团队身份控制。
 
-设计方案生成、业务 API 连接、按需上下文获取、受控修改和测试是后续目标，按实际任务逐步接入同一应用。当前不预建空包、不新增第二套 Agent 工程、不把角色名称自动实现成多个 Agent。运行产物与可写任务副本归入忽略的 runs/<run-id>，独立测试和参考不交给被测 Agent 修改。
+MCP Python 2.3.0、Agents SDK 0.24.0 与其余依赖由 `uv.lock` 固定。MCP 入口是固定受信本地子进程，只开放两个已核对输入契约的业务工具，不是任意远端 MCP 工具平台。凭据不交给模型。子进程不是安全沙箱，读操作取消也不保证撤回已发出的请求。
 
-## 主底座与 SDK 选型边界
+## 分讲入口与历史
 
-主线采用 OpenAI Agents SDK（Python），当前 repo_agent 已迁移到 Agent / Runner / function_tool / RunHooks，锁定 openai-agents 0.24.0。第 4–5 讲在同一实现中提供只读工具、模型轮次与工具总预算、停止分类和离线检查。LangChain 旧源码及运行记录从历史固定版本获取，不在活动源码中并行维护。
+- [第4–9讲](examples/repo_reading/README.md)：只读循环、工具与取材；旧脚本保留为阶段入口。
+- [第10讲](examples/repo_reading/10_README.md)、[第11讲](examples/repo_reading/11_README.md)：业务 API 与结构化结果。
+- [第12讲](examples/repo_reading/12_README.md)：页面/CLI、事件和取消。
+- [第13讲](examples/repo_reading/13_README.md)、[第14讲](examples/repo_reading/14_README.md)：连续会话与持久化。
+- [第15讲](examples/repo_reading/15_README.md)、[第16讲](examples/repo_reading/16_README.md)：任务方法与 MCP。
 
-[OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk)用于构建自己的 Agent/Harness；[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)用于复用成熟 Codex 研发执行；App Server 是更底层的集成接口。后续状态、审批和恢复复用 OpenAI Agents SDK 原生机制，企业授权、Task/Run、隔离与接受条件由应用实现。不引入 LangGraph/Deep Agents 作为主线运行时。
+历史固定版本保持不变。`lesson-04-sdk-20261025` / `lesson-05-sdk-20261025` 是 SDK 起步版；`lesson-15-skills-20261113` 是本讲基线。迁移前 LangChain 实现可从 `69d2233` 历史查看，不在当前源码中并行维护。
 
-资料获取从直接读取、按需搜索和现有系统查询开始，向量/混合索引由实际漏检和成本决定，不强制增加向量数据库。SDK 已按实际验证写入锁文件；新增索引组件仍须有对应任务与验证，不能因为规划而增加依赖。
+## 后续架构与仓库边界
 
-SDK 用于复用循环、工具派发、流式事件、会话/运行状态、审批和追踪等机制。实现仍需提供业务工具、身份/数据范围、持久化配置、隔离执行和任务评测。模型/工具边界回归与真实任务分别验收，任务结束不自动等于答案正确；后续会话、审批、MCP、Web 与执行隔离尚待对应讲次实现。
+后续沿同一应用接入计划、身份、确认、受限执行、独立验证和恢复，再完善评测、发布与部署。按出现的职责逐步分包，不预建空目录或通用工作流平台。当前只有一个循环拥有者，不把 Codex SDK/App Server 当作普通模型 URL 替换。
+
+本公开仓库只保存源码、测试、合成输入、配置样例与开发者说明。付费正文、配图和写作证据在独立私有文稿库；真实运行副本、日志和补丁归入忽略的 `runs/<run-id>`，密钥和企业数据不发布。`fixtures/order-service` 与 `fixtures/order-service-missing` 是两个验收输入，均需保留。旧 `team_harness` 等工程仅查 Git 历史，不恢复平行应用；具体开发约束见 [AGENTS.md](AGENTS.md)。

@@ -63,6 +63,14 @@ def check_record(record):
         if 'skills' in record:
             from repo_agent.skills import SkillLibrary, SkillRun
             method_state = SkillRun(SkillLibrary.from_record(record['skills']))
+        if 'mcp' in record:
+            from types import SimpleNamespace
+            from repo_agent.mcp_business import checked_catalog
+            mcp = record['mcp']
+            if (mcp['contract'] != 'business-mcp-stdio-v1' or mcp['transport'] != 'stdio'
+                    or checked_catalog([SimpleNamespace(name=t['name'], input_schema=t['input_schema'])
+                        for t in mcp['tools']]) != mcp['tools']):
+                errors.append('mcp_catalog')
         sources = record["sources"]
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
             errors.append("snapshot_hash")
