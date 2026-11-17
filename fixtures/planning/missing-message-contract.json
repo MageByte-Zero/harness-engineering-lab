@@ -1,0 +1,12 @@
+{
+  "goal": "订单不存在时增加面向用户的 message。只提出修改计划，不执行。",
+  "constraints": [
+    {"id": "c_status", "text": "保留 HTTP 404 和 code=ORDER_NOT_FOUND。"},
+    {"id": "c_success", "text": "订单存在时的正常查询响应保持不变。"}
+  ],
+  "acceptance": [
+    {"id": "a_missing", "text": "订单不存在响应含 message，且保留原状态码与 code。"},
+    {"id": "a_found", "text": "正常查询响应与修改前一致。"}
+  ],
+  "open_questions": ["message 是否被客户端程序解析、需要固定文案，还是只供人阅读？请接口使用方确认。"]
+}

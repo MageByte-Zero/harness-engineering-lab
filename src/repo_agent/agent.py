@@ -24,15 +24,19 @@ RETRIEVAL_INSTRUCTIONS = """你是只读资料审查助手，用中文回答当�
 
 
 def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS, extra_tools=(),
-                structured_output: bool = False, observation_prefix: str = ""):
-    from repo_agent.output import InvestigationAnswer, with_observation_ids
+                structured_output: bool = False, observation_prefix: str = "", planning: bool = False):
+    from repo_agent.output import output_model, with_observation_ids
     tools = [*repository_tools(sources), *extra_tools]
+    if planning:
+        from repo_agent.planning import submission_tool
+        tools.append(submission_tool())
     return Agent(
         name="Repository reader",
         model=model,
         tools=with_observation_ids(tools, prefix=observation_prefix) if structured_output else tools,
         instructions=instructions,
-        output_type=InvestigationAnswer if structured_output else None,
+        output_type=output_model() if structured_output and not planning else None,
         model_settings=ModelSettings(tool_choice='required') if structured_output else ModelSettings(),
-        reset_tool_choice=True,
+        tool_use_behavior={'stop_at_tool_names': ['submit_change_plan']} if planning else 'run_llm_again',
+        reset_tool_choice=not planning,
     )

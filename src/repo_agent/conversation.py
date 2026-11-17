@@ -91,7 +91,7 @@ class ConversationWorker:
         conversation.busy = True
         return conversation
 
-    async def __call__(self, question, output, *, conversation, run_id, emit):
+    async def __call__(self, question, output, *, conversation, run_id, emit, planning_request=None):
         from repo_agent.application import investigate
         if self.store is not None:
             conversation.turns = await self.store.read_history(conversation.turns)
@@ -103,7 +103,8 @@ class ConversationWorker:
             await session.add_items(selection['history'])
             record = await investigate(self.sources, question, output, business_url=self.business_url,
                 business_token=self.business_token, run_id=run_id, emit=emit,
-                session=session, conversation=selection, skills=self.skills, business_transport=self.business_transport)
+                session=session, conversation=selection, skills=self.skills, business_transport=self.business_transport,
+                planning_request=planning_request)
             from repo_agent.output import consume_answer
             if consume_answer(record)['kind'] != 'unavailable':
                 items = await session.get_items()

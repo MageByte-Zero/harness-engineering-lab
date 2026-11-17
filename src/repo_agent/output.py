@@ -37,11 +37,19 @@ next_steps只列解决当前缺口所需的只读查询或人工补充，不扩�
 """
 
 
-def output_contract():
-    schema = AgentOutputSchema(InvestigationAnswer)
-    return {'name': 'investigation-answer-v1', 'schema': schema.json_schema(),
+def output_model(*, planning=False):
+    if planning:
+        from repo_agent.planning import ChangePlan
+        return ChangePlan
+    return InvestigationAnswer
+
+
+def output_contract(*, planning=False):
+    schema = AgentOutputSchema(output_model(planning=planning))
+    return {'name': 'change-plan-v1' if planning else 'investigation-answer-v1', 'schema': schema.json_schema(),
             'strict': schema.is_strict_json_schema(), 'initial_tool_choice': 'required',
-            'reset_tool_choice': True}
+            'reset_tool_choice': not planning,
+            **({'delivery': 'submit_change_plan'} if planning else {})}
 
 
 def with_observation_ids(tools, *, prefix=""):
@@ -77,6 +85,9 @@ def observed_source(message):
 
 def assess_answer(record):
     """Check shape and observed source associations, never free-form claim meaning."""
+    if 'planning' in record:
+        from repo_agent.planning import assess_plan
+        return assess_plan(record)
     report = {'schema': 'not_produced', 'sources': 'not_checked', 'errors': [],
               'evidence': [], 'semantic_review': 'pending'}
     if record.get('answer') is None:
@@ -110,6 +121,9 @@ def assess_answer(record):
 
 def consume_answer(record):
     """Return a view model for CLI or a future page; never approve business actions."""
+    if 'planning' in record:
+        from repo_agent.planning import consume_plan
+        return consume_plan(record)
     from repo_agent.checks import check_record
     report = check_record(record)
     checks = report.get('answer_checks', {})

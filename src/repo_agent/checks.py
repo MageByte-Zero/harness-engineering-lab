@@ -72,6 +72,12 @@ def check_record(record):
                         for t in mcp['tools']]) != mcp['tools']):
                 errors.append('mcp_catalog')
         sources = record["sources"]
+        if 'planning' in record:
+            from repo_agent.planning import PlanningRequest, digest
+            planning = record['planning']
+            if (PlanningRequest.model_validate(planning['request']).model_dump(mode='json') != planning['request']
+                    or digest(planning['request']) != planning['request_sha256']):
+                errors.append('planning_request')
         if not sources or any(source_hash(s["content"]) != s["sha256"] for s in sources.values()):
             errors.append("snapshot_hash")
         snapshot_id = snapshot_hash({path: source["content"] for path, source in sources.items()})
@@ -126,6 +132,13 @@ def check_record(record):
                         if result['status'] == 'ok' and not result['already_loaded']:
                             method_loads.append({'call_id': call_id,
                                 **{k: result[k] for k in ('name', 'path', 'sha256')}})
+                        continue
+                    if message['name'] == 'submit_change_plan':
+                        from repo_agent.planning import ChangePlan
+                        submitted = ChangePlan.model_validate(call['args']['plan']).model_dump(mode='json')
+                        if ('planning' not in record or result.get('status') != 'submitted'
+                                or result.get('scope') != 'plan_proposal' or result.get('plan') != submitted):
+                            errors.append('plan_submission')
                         continue
                     if message['name'] in ('get_order_status', 'get_order_events'):
                         from repo_agent.business import validate_data
@@ -222,10 +235,19 @@ def check_record(record):
                     expected_tools.extend({'name': t.name, 'description': t.description,
                         'parameters': t.params_json_schema, 'strict': t.strict_json_schema}
                         for t in skill_tools(method_state))
+                if 'planning' in record:
+                    from repo_agent.planning import submission_tool
+                    tool = submission_tool()
+                    expected_tools.append({'name': tool.name, 'description': tool.description,
+                        'parameters': tool.params_json_schema, 'strict': tool.strict_json_schema})
                 if fixed:
                     expected_tools = []
+                current_input = record['question']
+                if 'planning' in record:
+                    from repo_agent.planning import planning_input
+                    current_input = planning_input(current_input, record['planning']['request'])
                 expected_input = (fixed_input(record['question'], record) if fixed else
-                                  [{'role': 'user', 'content': record.get('conversation', {}).get('current_input', record['question'])}])
+                                  [{'role': 'user', 'content': record.get('conversation', {}).get('current_input', current_input)}])
                 history = record.get("conversation", {}).get("history", [])
                 if history:
                     expected_input = history + expected_input
@@ -247,7 +269,7 @@ def check_record(record):
                         errors.append("context_input")
                     if 'output_contract' in record:
                         from repo_agent.output import output_contract
-                        if payload.get('output_schema') != output_contract():
+                        if payload.get('output_schema') != output_contract(planning='planning' in record):
                             errors.append('context_output_schema')
                     if items[:len(history)] != history:
                         errors.append("conversation_history")
@@ -282,22 +304,31 @@ def check_record(record):
         if not record.get("finished_at") or not record.get("stop_reason"):
             errors.append("unfinished_record")
         if record["stop_reason"] == "answer_returned":
-            if not record.get("answer") or not (reads or api_reads) or set(requests) != results:
+            information_request = ('planning' in record and record.get('answer')
+                and record['answer'].get('outcome') == 'needs_information'
+                and not record['answer'].get('facts') and not record['answer'].get('steps'))
+            if not record.get("answer") or not (reads or api_reads or information_request) or set(requests) != results:
                 errors.append("incomplete_answer_run")
         if 'output_contract' in record:
             from pydantic import ValidationError
-            from repo_agent.output import InvestigationAnswer, assess_answer, output_contract
-            if record['output_contract'] != output_contract():
+            from repo_agent.output import output_model, assess_answer, output_contract
+            if record['output_contract'] != output_contract(planning='planning' in record):
                 errors.append('output_contract')
             if record.get('answer_checks') != assess_answer(record):
                 errors.append('answer_checks')
             if record.get('answer') is not None:
                 last = record['events'][-1]['state']['messages'][-1]
                 try:
-                    parsed = InvestigationAnswer.model_validate_json(last['content'])
-                    if (last['type'] != 'ai' or last.get('tool_calls')
-                            or parsed.model_dump(mode='json') != record['answer']):
-                        errors.append('final_output')
+                    if 'planning' in record:
+                        submissions = [m for e in record['events'] for m in e['state']['messages']
+                            if m['type'] == 'tool' and m['name'] == 'submit_change_plan']
+                        if len(submissions) != 1 or json.loads(submissions[0]['content'])['plan'] != record['answer']:
+                            errors.append('final_output')
+                    else:
+                        parsed = output_model().model_validate_json(last['content'])
+                        if (last['type'] != 'ai' or last.get('tool_calls')
+                                or parsed.model_dump(mode='json') != record['answer']):
+                            errors.append('final_output')
                 except ValidationError:
                     errors.append('final_output')
     except (KeyError, TypeError, ValueError, IndexError, AttributeError):

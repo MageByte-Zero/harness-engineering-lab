@@ -10,11 +10,12 @@ from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
 
 
-async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http"):
+async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http", planning_request=None):
     async def execute(client):
         return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
             session=session, conversation=conversation, skills=skills,
-            instructions=BUSINESS_INSTRUCTIONS, business_client=client, structured_output=True)
+            instructions=BUSINESS_INSTRUCTIONS, business_client=client, structured_output=True,
+            planning_request=planning_request)
     if business_transport == 'mcp':
         from repo_agent.mcp_business import MCPBusinessClient
         async with MCPBusinessClient(business_url, business_token) as client:
@@ -41,6 +42,7 @@ class ActiveRun:
     cancel_requested: bool = False
     conversation_id: str | None = None
     context_selection: dict | None = None
+    planning_request: dict | None = None
 
     def emit(self, kind, data=None):
         self.events.append({'seq': len(self.events) + 1, 'run_id': self.run_id,
@@ -49,7 +51,8 @@ class ActiveRun:
     def view(self):
         return {'run_id': self.run_id, 'question': self.question, 'state': self.state,
                 'cancel_requested': self.cancel_requested, 'result': self.result,
-                'conversation_id': self.conversation_id, 'context_selection': self.context_selection}
+                'conversation_id': self.conversation_id, 'context_selection': self.context_selection,
+                **({'planning_request': self.planning_request} if self.planning_request is not None else {})}
 
 
 class RunManager:
@@ -65,15 +68,18 @@ class RunManager:
                 run = ActiveRun(**saved['view'], events=saved['events'])
                 self.runs[run.run_id] = run
 
-    def submit(self, question, *, conversation_id=None):
+    def submit(self, question, *, conversation_id=None, planning_request=None):
         question = question.strip()
         if not 1 <= len(question) <= 2000:
             raise ValueError('Question must contain 1–2000 characters')
+        if planning_request is not None:
+            from repo_agent.planning import PlanningRequest
+            planning_request = PlanningRequest.model_validate(planning_request).model_dump(mode='json')
         if (self.closed or len(self.runs) >= self.retained_limit or
                 sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
             raise CapacityExceeded()
         conversation = self.worker.acquire(conversation_id) if conversation_id else None
-        run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id)
+        run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id, planning_request=planning_request)
         run.emit('queued')
         try:
             if self.store is not None:
@@ -97,7 +103,8 @@ class RunManager:
                 self.store.save_run(run.view(), run.events)
             run.execution = asyncio.create_task(self.worker(run.question,
                 self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
-                **({"conversation":conversation} if conversation is not None else {})))
+                **({"conversation":conversation} if conversation is not None else {}),
+                **({'planning_request': run.planning_request} if run.planning_request is not None else {})))
             record = await run.execution
             selection = record.get("conversation")
             if selection:

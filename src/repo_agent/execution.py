@@ -22,7 +22,8 @@ from repo_agent.agent import INSTRUCTIONS, build_agent
 from repo_agent.tools import load_source_bundle, load_sources, source_hash
 from repo_agent.retrieval import collect_fixed, fixed_input, validate_queries
 from repo_agent import model as model_module
-from repo_agent.output import InvestigationAnswer, OUTPUT_INSTRUCTIONS, assess_answer, output_contract
+from repo_agent.output import OUTPUT_INSTRUCTIONS, assess_answer, output_contract, output_model
+from repo_agent.planning import PLAN_INSTRUCTIONS, PlanningRequest, digest
 
 MODEL_LIMIT = 12
 TOOL_LIMIT = 16
@@ -40,7 +41,11 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
                    retrieval_queries: tuple[str, ...] | None = None, business_client=None,
                    structured_output: bool = False, run_id: str | None = None, emit=None, session=None, conversation=None,
-                   skills=None):
+                   skills=None, planning_request=None):
+    if planning_request is not None:
+        planning_request = PlanningRequest.model_validate(planning_request)
+        if not structured_output:
+            raise ValueError('Planning requires structured output')
     if structured_output and retrieval_queries is not None:
         raise ValueError('Structured answers currently use agent-selected tools, not fixed retrieval')
     if business_client is not None and (retrieval_queries is not None or business_client.observations):
@@ -52,7 +57,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
     if skills is not None:
         instructions += skills.instructions()
     if structured_output:
-        instructions += OUTPUT_INSTRUCTIONS
+        instructions += PLAN_INSTRUCTIONS if planning_request is not None else OUTPUT_INSTRUCTIONS
     if context_char_limit <= 0:
         raise ValueError("Context character limit must be positive")
     if retrieval_queries is not None:
@@ -69,7 +74,10 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
         record['conversation'] = conversation
         record['observation_prefix'] = record['run_id'] + '/'
     if structured_output:
-        record['output_contract'] = output_contract()
+        record['output_contract'] = output_contract(planning=planning_request is not None)
+    if planning_request is not None:
+        request_data = planning_request.model_dump(mode='json')
+        record['planning'] = {'request': request_data, 'request_sha256': digest(request_data)}
     if skills is not None:
         record['skills'] = {**skills.record(), 'loads': []}
     # Reserve before calling a paid API; a typo must not overwrite a previous run.
@@ -88,6 +96,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                              'tools': business_client.catalog}
         save()
         pending = set()
+        submitted_plans = []
         phase = "input"
         model = None
 
@@ -109,7 +118,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                                   "parameters": tool.params_json_schema, "strict": tool.strict_json_schema})
                 payload = {"instructions": system_prompt, "input": input_items, "tools": tools}
                 if structured_output:
-                    payload['output_schema'] = output_contract()
+                    payload['output_schema'] = record['output_contract']
                 serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 blocked = len(serialized) > context_char_limit
                 record["model_inputs"].append({"call_index": len(record["model_inputs"]) + 1,
@@ -159,13 +168,15 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 if not isinstance(context, ToolContext) or not isinstance(result, dict):
                     raise TypeError("Repository tools require a tool-call context and a dictionary result")
                 pending.discard(context.tool_call_id)
+                if planning_request is not None and tool.name == 'submit_change_plan':
+                    submitted_plans.append(result['plan'])
                 if result.get('scope') == 'skill_method' and result.get('status') == 'ok' and not result.get('already_loaded'):
                     record['skills']['loads'].append({'call_id': context.tool_call_id,
                         **{k: result[k] for k in ('name', 'path', 'sha256')}})
                 self.read_observed |= (tool.name == "read_file" or
                     (business_client is not None and tool.name in ("get_order_status", "get_order_events")
                      and result.get("scope") == "business_readonly")) and result.get("status") == "ok"
-                if result.get("status") != "ok":
+                if result.get("status") not in ('ok', 'submitted'):
                     record["tool_issues"].append({"call_id": context.tool_call_id,
                                                 "tool": tool.name, "status": result.get("status")})
                 record["events"].append({"node": "tools", "state": {"messages": [
@@ -182,6 +193,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 skills.check_unchanged()
             hooks = ObservationHooks()
             sdk_input = question
+            if planning_request is not None:
+                from repo_agent.planning import planning_input
+                sdk_input = planning_input(question, record['planning']['request'])
             if conversation is not None:
                 from repo_agent.conversation import CONVERSATION_INSTRUCTIONS
                 if conversation["history"] or conversation["omitted_turns"]:
@@ -217,15 +231,25 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 from repo_agent.skills import SkillRun, skill_tools
                 extra_tools.extend(skill_tools(SkillRun(skills)))
             agent = build_agent(model, sources, instructions=instructions, extra_tools=extra_tools,
-                                structured_output=structured_output, observation_prefix=record.get("observation_prefix", ""))
+                                structured_output=structured_output, observation_prefix=record.get("observation_prefix", ""),
+                                planning=planning_request is not None)
             if retrieval_queries is not None:
                 agent.tools = []
             save()
             result = await Runner.run(agent, sdk_input,
                 max_turns=MODEL_LIMIT, hooks=hooks, run_config=RunConfig(tracing_disabled=True), session=session)
-            record["answer"] = (result.final_output.model_dump(mode='json') if structured_output
-                                else result.final_output)
-            record["stop_reason"] = ("answer_returned" if record["answer"] and hooks.read_observed
+            if planning_request is not None:
+                # SDK 0.24.0 stringifies a tool-stop result; retain the typed tool value from the hook.
+                if len(submitted_plans) != 1:
+                    raise ModelBehaviorError('Planning requires a typed tool submission')
+                record['answer'] = submitted_plans[0]
+            else:
+                record["answer"] = (result.final_output.model_dump(mode='json') if structured_output
+                                    else result.final_output)
+            information_request = (planning_request is not None and record['answer']
+                and record['answer']['outcome'] == 'needs_information'
+                and not record['answer']['facts'] and not record['answer']['steps'])
+            record["stop_reason"] = ("answer_returned" if record["answer"] and (hooks.read_observed or information_request)
                                      else ("no_observation" if business_client is not None else "no_source_read")
                                      if not hooks.read_observed else "no_answer")
         except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
@@ -248,7 +272,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 if (structured_output and last.get('type') == 'ai'
                         and not last.get('tool_calls') and last.get('content')):
                     try:
-                        InvestigationAnswer.model_validate_json(last['content'])
+                        output_model(planning=planning_request is not None).model_validate_json(last['content'])
                     except ValidationError:
                         stop = 'output_invalid'
             else:

@@ -11,12 +11,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from repo_agent.application import CapacityExceeded
 from repo_agent.conversation import ConversationBusy, ConversationScopeChanged
+from repo_agent.planning import PlanningRequest
 
 
 class Submission(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     question: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    planning_request: PlanningRequest | None = None
 
 
 def create_app(manager):
@@ -76,7 +78,8 @@ def create_app(manager):
                 raise HTTPException(404, 'Conversation not found')
             if hasattr(manager.worker, 'conversations') and not body.conversation_id:
                 raise HTTPException(422, 'Create a conversation first')
-            return manager.submit(body.question, conversation_id=body.conversation_id).view()
+            return manager.submit(body.question, conversation_id=body.conversation_id,
+                planning_request=body.planning_request).view()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except ConversationScopeChanged as exc:

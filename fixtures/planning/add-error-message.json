@@ -1,0 +1,14 @@
+{
+  "goal": "订单不存在时增加面向用户的 message，不改变既有接口行为。只提出修改计划，不执行。这是 code/ 源码内的响应格式小改动，不涉及订单规程或实时订单数据。",
+  "constraints": [
+    {"id": "c_status", "text": "订单不存在仍返回 HTTP 404。"},
+    {"id": "c_code", "text": "原 code=ORDER_NOT_FOUND 保持不变。"},
+    {"id": "c_message", "text": "增加固定 message=订单不存在，不把异常消息、堆栈或订单编号放进 message。"},
+    {"id": "c_success", "text": "订单存在时，正常查询响应的状态码与字段保持不变。"}
+  ],
+  "acceptance": [
+    {"id": "a_missing", "text": "查询不存在的订单，检查 HTTP 404，code=ORDER_NOT_FOUND，message=订单不存在，响应不含内部异常信息。"},
+    {"id": "a_found", "text": "查询存在的订单，对照修改前结果，状态码与业务字段保持不变。"}
+  ],
+  "open_questions": []
+}

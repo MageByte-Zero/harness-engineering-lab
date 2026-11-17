@@ -22,6 +22,7 @@ from repo_agent.web import create_app
 from repo_agent.conversation import ConversationWorker
 from repo_agent.persistence import LocalStore
 from repo_agent.skills import SkillLibrary
+from repo_agent.planning import PlanningRequest
 
 
 def main():
@@ -36,7 +37,14 @@ def main():
     parser.add_argument('--conversation-id', help='Resume an existing conversation in persistent CLI mode')
     parser.add_argument('--skills-dir', type=Path, help='Trusted local read-only method packages; no script execution')
     parser.add_argument('--business-transport', choices=['http', 'mcp'], default='http')
+    parser.add_argument('--plan-request', type=Path, help='JSON requirement; CLI only, creates a read-only change plan')
     args = parser.parse_args()
+    planning_request = None
+    if args.plan_request:
+        if args.follow_up:
+            parser.error('--plan-request cannot be combined with --follow-up; submit another version explicitly')
+        planning_request = PlanningRequest.model_validate_json(args.plan_request.read_text(encoding='utf-8'))
+        args.question = args.question or planning_request.goal
     skills = SkillLibrary(args.skills_dir) if args.skills_dir else None
     if args.data_dir and not args.conversation:
         parser.error('--data-dir requires --conversation')
@@ -108,13 +116,15 @@ def main():
                         for index, question in enumerate([args.question, *args.follow_up], 1):
                             options = {'conversation':conversation, 'run_id':str(uuid4()), 'emit':lambda *a: None} if conversation else {}
                             if store is not None and conversation is not None:
-                                run = manager.submit(question, conversation_id=conversation.conversation_id)
+                                run = manager.submit(question, conversation_id=conversation.conversation_id,
+                                    planning_request=planning_request)
                                 assert run.task is not None
                                 await run.task
                                 result = run.result
                                 print('Run:', run.run_id, flush=True)
                             else:
-                                record = await worker(question, directory / (f'cli-{index}.json' if conversation else 'cli.json'), **options)
+                                record = await worker(question, directory / (f'cli-{index}.json' if conversation else 'cli.json'),
+                                    **options, planning_request=planning_request)
                                 result = consume_answer(record)
                             print(json.dumps(result, ensure_ascii=False, indent=2))
                             if result is None or result['kind'] == 'unavailable':
