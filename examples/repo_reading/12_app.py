@@ -23,6 +23,7 @@ from repo_agent.conversation import ConversationWorker
 from repo_agent.persistence import LocalStore
 from repo_agent.skills import SkillLibrary
 from repo_agent.planning import PlanningRequest
+from repo_agent.access import load_local_access
 
 
 def main():
@@ -38,6 +39,8 @@ def main():
     parser.add_argument('--skills-dir', type=Path, help='Trusted local read-only method packages; no script execution')
     parser.add_argument('--business-transport', choices=['http', 'mcp'], default='http')
     parser.add_argument('--plan-request', type=Path, help='JSON requirement; CLI only, creates a read-only change plan')
+    parser.add_argument('--access-config', type=Path, help='Trusted local project grants; requires --conversation and --data-dir')
+    parser.add_argument('--project', help='Requested project for authenticated CLI; AGENT_CREDENTIAL verifies the actor')
     args = parser.parse_args()
     planning_request = None
     if args.plan_request:
@@ -48,6 +51,10 @@ def main():
     skills = SkillLibrary(args.skills_dir) if args.skills_dir else None
     if args.data_dir and not args.conversation:
         parser.error('--data-dir requires --conversation')
+    if args.access_config and not (args.conversation and args.data_dir):
+        parser.error('--access-config requires --conversation and --data-dir')
+    if args.access_config and args.question and not (args.project and os.environ.get('AGENT_CREDENTIAL')):
+        parser.error('Authenticated CLI requires --project and AGENT_CREDENTIAL')
     if args.conversation_id and not (args.data_dir and args.question):
         parser.error('--conversation-id requires --data-dir and --question')
     if args.follow_up and not (args.conversation and args.question):
@@ -71,8 +78,20 @@ def main():
         directory = store.records if store else Path('runs') / f'interactive-{uuid4()}'
         directory.mkdir(parents=True, exist_ok=True)
         token = 'teaching-only-local'
-        service_env = {k: v for k, v in os.environ.items() if not k.startswith(('MODEL_', 'OPENAI_', 'BUSINESS_'))}
-        service_env['BUSINESS_API_TOKEN'] = token
+        url = f'http://127.0.0.1:{args.business_port}'
+        access = load_local_access(args.access_config, args.data_dir / 'local-credentials.json', url) if args.access_config else None
+        principal = None
+        if access is not None:
+            print('Local credentials (keep private):', args.data_dir / 'local-credentials.json', flush=True)
+            if args.question:
+                principal = access.authenticate(os.environ.get('AGENT_CREDENTIAL'))
+                access.project(principal, args.project)
+        service_env = {k: v for k, v in os.environ.items() if not k.startswith(('MODEL_', 'OPENAI_', 'BUSINESS_', 'AGENT_'))}
+        if access is None:
+            service_env['BUSINESS_API_TOKEN'] = token
+        else:
+            service_env['BUSINESS_GRANTS'] = json.dumps({p.business_token: sorted(p.allowed_orders) for p in access.projects.values()})
+            token = next(iter(access.projects.values())).business_token
         # Fail on a busy port; never attach silently to an unrelated service.
         import socket
         with socket.socket() as probe:
@@ -84,7 +103,6 @@ def main():
                 '--mode', args.business_mode, '--log', str(directory / f'service-{service_id}.jsonl')], env=service_env,
                 stdout=service_log, stderr=service_log)
             try:
-                url = f'http://127.0.0.1:{args.business_port}'
                 for _ in range(50):
                     if child.poll() is not None:
                         raise RuntimeError('Synthetic service failed to start; inspect run logs')
@@ -99,8 +117,8 @@ def main():
                 worker = partial(investigate, {'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
                                  business_url=url, business_token=token, skills=skills, business_transport=args.business_transport)
                 if args.conversation:
-                    worker = ConversationWorker({'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
-                        business_url=url, business_token=token, store=store, skills=skills, business_transport=args.business_transport)
+                    worker = ConversationWorker({} if access is not None else {'code': Path('fixtures/order-service'), 'policy': Path('fixtures/order-policy')},
+                        business_url=url, business_token=token, store=store, skills=skills, business_transport=args.business_transport, access=access)
                 print('Run logs:', directory, flush=True)
                 manager = RunManager(directory, worker)
                 if args.question:
@@ -108,16 +126,17 @@ def main():
                         if args.conversation_id and isinstance(worker, ConversationWorker):
                             if args.conversation_id not in worker.conversations:
                                 parser.error('Conversation not found in this data directory')
-                            conversation = worker.conversations[args.conversation_id]
+                            conversation = worker.find(args.conversation_id, principal=principal)
                         else:
-                            conversation = worker.create() if isinstance(worker, ConversationWorker) else None
+                            conversation = worker.create(**({'principal':principal, 'project_id':args.project}
+                                if access is not None else {})) if isinstance(worker, ConversationWorker) else None
                         if conversation is not None:
                             print('Conversation:', conversation.conversation_id, flush=True)
                         for index, question in enumerate([args.question, *args.follow_up], 1):
                             options = {'conversation':conversation, 'run_id':str(uuid4()), 'emit':lambda *a: None} if conversation else {}
                             if store is not None and conversation is not None:
                                 run = manager.submit(question, conversation_id=conversation.conversation_id,
-                                    planning_request=planning_request)
+                                    planning_request=planning_request, principal=principal, project_id=args.project)
                                 assert run.task is not None
                                 await run.task
                                 result = run.result

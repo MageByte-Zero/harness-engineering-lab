@@ -8,6 +8,7 @@ from uuid import uuid4
 from agents import SQLiteSession
 
 from repo_agent.tools import load_source_bundle, snapshot_hash
+from repo_agent.access import AccessDenied
 
 CONVERSATION_INSTRUCTIONS = """
 历史仅帮助理解指代；用户更换目标时采用新目标。本轮事实必须重新取材，只引用本轮完整observation_id（含运行前缀）。
@@ -54,9 +55,10 @@ class Conversation:
 
 class ConversationWorker:
     """Bind resources once; a temporary SDK session cannot pollute committed history."""
-    def __init__(self, sources, *, business_url, business_token, store=None, skills=None, business_transport="http"):
+    def __init__(self, sources, *, business_url, business_token, store=None, skills=None, business_transport="http", access=None):
+        self.access = access
         self.sources, self.business_url, self.business_token = sources, business_url, business_token
-        self.source_hash = snapshot_hash(load_source_bundle(sources))
+        self.source_hash = snapshot_hash(load_source_bundle(sources)) if access is None else ''
         self.store = store
         self.skills = skills
         self.business_transport = business_transport
@@ -70,41 +72,76 @@ class ConversationWorker:
         self.conversations: dict[str, Conversation] = {}
         if store is not None:
             for saved in store.load_conversations():
+                if access is None and saved['scope'].get('ownership'):
+                    raise AccessDenied('This data directory requires an access configuration')
                 self.conversations[saved['id']] = Conversation(
                     conversation_id=saved['id'], turns=saved['turns'], scope=saved['scope'])
 
-    def create(self):
+    def bound_scope(self, principal, project_id):
+        assert self.access is not None
+        project = self.access.project(principal, project_id)
+        return {**self.scope, 'ownership': {'owner_id': principal, 'project_id': project_id},
+            'source_hash': snapshot_hash(load_source_bundle(project.sources)),
+            'sources': {k: str(v.resolve()) for k, v in project.sources.items()},
+            'business_url': project.business_url, 'allowed_orders': sorted(project.allowed_orders)}
+
+    def visible(self, principal):
+        return [c for c in self.conversations.values()
+            if self.access is None or self.access.can_read(principal, c.scope.get('ownership'))]
+
+    def find(self, identity, *, principal=None):
+        conversation = self.conversations.get(identity)
+        if self.access is not None:
+            self.access.require_owner(principal, conversation.scope.get('ownership') if conversation else None)
+        if conversation is None:
+            raise AccessDenied('Resource unavailable')
+        return conversation
+
+    def create(self, *, principal=None, project_id=None):
+        scope = self.bound_scope(principal, project_id) if self.access is not None else self.scope
         if len(self.conversations) >= 32:
             raise ValueError('Conversation capacity reached (32); use another data directory for a new local workspace')
-        conversation = Conversation(scope=self.scope)
+        conversation = Conversation(scope=scope)
         if self.store is not None:
             self.store.add_conversation(conversation.conversation_id, conversation.scope)
         self.conversations[conversation.conversation_id] = conversation
         return conversation
 
-    def acquire(self, identity):
-        conversation = self.conversations[identity]
-        if conversation.scope != self.scope:
+    def acquire(self, identity, *, principal=None, project_id=None):
+        conversation = self.find(identity, principal=principal)
+        scope = self.bound_scope(principal, project_id) if self.access is not None else self.scope
+        if conversation.scope != scope:
             raise ConversationScopeChanged('Bound resources changed; create a new conversation')
         if conversation.busy:
             raise ConversationBusy()
         conversation.busy = True
         return conversation
 
-    async def __call__(self, question, output, *, conversation, run_id, emit, planning_request=None):
+    async def __call__(self, question, output, *, conversation, run_id, emit, planning_request=None, principal=None):
         from repo_agent.application import investigate
+        sources, business_url, business_token = self.sources, self.business_url, self.business_token
+        allowed_orders, ownership = None, None
+        expected_hash = self.source_hash
+        if self.access is not None:
+            ownership = conversation.scope.get('ownership')
+            project = self.access.require_owner(principal, ownership)
+            if conversation.scope != self.bound_scope(principal, ownership['project_id']):
+                raise ConversationScopeChanged('Bound resources changed')
+            sources, business_url, business_token = project.sources, project.business_url, project.business_token
+            allowed_orders, expected_hash = project.allowed_orders, conversation.scope['source_hash']
+        # Authorization happens before persisted history or source content is loaded for a run.
         if self.store is not None:
             conversation.turns = await self.store.read_history(conversation.turns)
         selection = conversation.select()
-        if snapshot_hash(load_source_bundle(self.sources)) != self.source_hash:
+        if snapshot_hash(load_source_bundle(sources)) != expected_hash:
             raise ValueError('Bound sources changed; restart to bind a new conversation scope')
         session = SQLiteSession(conversation.conversation_id)  # :memory:, one staged attempt.
         try:
             await session.add_items(selection['history'])
-            record = await investigate(self.sources, question, output, business_url=self.business_url,
-                business_token=self.business_token, run_id=run_id, emit=emit,
+            record = await investigate(sources, question, output, business_url=business_url,
+                business_token=business_token, run_id=run_id, emit=emit,
                 session=session, conversation=selection, skills=self.skills, business_transport=self.business_transport,
-                planning_request=planning_request)
+                planning_request=planning_request, allowed_orders=allowed_orders, ownership=ownership)
             from repo_agent.output import consume_answer
             if consume_answer(record)['kind'] != 'unavailable':
                 items = await session.get_items()

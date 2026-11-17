@@ -41,7 +41,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                    instructions: str = INSTRUCTIONS, context_char_limit: int = 60000,
                    retrieval_queries: tuple[str, ...] | None = None, business_client=None,
                    structured_output: bool = False, run_id: str | None = None, emit=None, session=None, conversation=None,
-                   skills=None, planning_request=None):
+                   skills=None, planning_request=None, ownership=None):
     if planning_request is not None:
         planning_request = PlanningRequest.model_validate(planning_request)
         if not structured_output:
@@ -70,6 +70,8 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
               "context_format": "sdk-input-v1", "context_char_limit": context_char_limit, "model_inputs": [],
               "python": platform.python_version(),
               "versions": {p: version(p) for p in ("openai-agents", "openai", "pydantic")}}
+    if ownership is not None:
+        record['ownership'] = dict(ownership)
     if conversation is not None:
         record['conversation'] = conversation
         record['observation_prefix'] = record['run_id'] + '/'

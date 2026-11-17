@@ -180,8 +180,10 @@ def consume_plan(record):
     snapshot = snapshot_hash({p: s['content'] for p, s in record['sources'].items()})
     binding = {'question': record['question'], 'request': request, 'snapshot_id': snapshot, 'plan': record['answer'],
                'evidence': checks['evidence']}
+    ownership = {'ownership': record['ownership']} if 'ownership' in record else {}
+    binding.update(ownership)
     return {'kind': 'plan_for_review' if record['answer']['outcome'] == 'ready_for_review'
             else 'plan_needs_information', **record['answer'], 'request': request,
         'artifact': {'id': record['run_id'] + '/plan', 'run_id': record['run_id'],
-            'revision': digest(binding), 'request_sha256': digest(request), 'snapshot_id': snapshot},
+            'revision': digest(binding), 'request_sha256': digest(request), 'snapshot_id': snapshot, **ownership},
         'evidence': checks['evidence'], 'semantic_review': 'pending', 'approval': 'not_requested'}

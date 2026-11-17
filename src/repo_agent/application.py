@@ -10,19 +10,20 @@ from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
 
 
-async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http", planning_request=None):
+async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http", planning_request=None, allowed_orders=None, ownership=None):
     async def execute(client):
         return await run_repository_async(sources, question, output, run_id=run_id, emit=emit,
             session=session, conversation=conversation, skills=skills,
             instructions=BUSINESS_INSTRUCTIONS, business_client=client, structured_output=True,
-            planning_request=planning_request)
+            planning_request=planning_request, ownership=ownership)
+    options = {'allowed_orders': allowed_orders} if allowed_orders is not None else {}
     if business_transport == 'mcp':
         from repo_agent.mcp_business import MCPBusinessClient
-        async with MCPBusinessClient(business_url, business_token) as client:
+        async with MCPBusinessClient(business_url, business_token, **options) as client:
             return await execute(client)
     if business_transport != 'http':
         raise ValueError('Unknown business transport')
-    return await execute(BusinessClient(business_url, business_token))
+    return await execute(BusinessClient(business_url, business_token, **options))
 
 
 
@@ -43,6 +44,7 @@ class ActiveRun:
     conversation_id: str | None = None
     context_selection: dict | None = None
     planning_request: dict | None = None
+    ownership: dict | None = None
 
     def emit(self, kind, data=None):
         self.events.append({'seq': len(self.events) + 1, 'run_id': self.run_id,
@@ -52,7 +54,8 @@ class ActiveRun:
         return {'run_id': self.run_id, 'question': self.question, 'state': self.state,
                 'cancel_requested': self.cancel_requested, 'result': self.result,
                 'conversation_id': self.conversation_id, 'context_selection': self.context_selection,
-                **({'planning_request': self.planning_request} if self.planning_request is not None else {})}
+                **({'planning_request': self.planning_request} if self.planning_request is not None else {}),
+                **({'ownership': self.ownership} if self.ownership is not None else {})}
 
 
 class RunManager:
@@ -65,10 +68,32 @@ class RunManager:
         self.store = getattr(worker, 'store', None)
         if self.store is not None:
             for saved in self.store.load_runs():
+                if getattr(worker, 'access', None) is None and saved['view'].get('ownership'):
+                    from repo_agent.access import AccessDenied
+                    raise AccessDenied('This data directory requires an access configuration')
                 run = ActiveRun(**saved['view'], events=saved['events'])
                 self.runs[run.run_id] = run
 
-    def submit(self, question, *, conversation_id=None, planning_request=None):
+    def get(self, run_id, *, principal=None):
+        from repo_agent.access import AccessDenied
+        run = self.runs.get(run_id)
+        access = getattr(self.worker, 'access', None)
+        if access is not None:
+            access.require_owner(principal, run.ownership if run else None)
+        if run is None:
+            raise AccessDenied('Resource unavailable')
+        return run
+
+    def visible(self, *, principal=None, conversation_id=None):
+        access = getattr(self.worker, 'access', None)
+        return [r for r in self.runs.values() if (conversation_id is None or r.conversation_id == conversation_id)
+            and (access is None or access.can_read(principal, r.ownership))]
+
+    def submit(self, question, *, conversation_id=None, planning_request=None, principal=None, project_id=None):
+        access = getattr(self.worker, 'access', None)
+        if access is not None:
+            access.project(principal, project_id)
+            self.worker.find(conversation_id, principal=principal)
         question = question.strip()
         if not 1 <= len(question) <= 2000:
             raise ValueError('Question must contain 1–2000 characters')
@@ -78,8 +103,10 @@ class RunManager:
         if (self.closed or len(self.runs) >= self.retained_limit or
                 sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
             raise CapacityExceeded()
-        conversation = self.worker.acquire(conversation_id) if conversation_id else None
-        run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id, planning_request=planning_request)
+        conversation = self.worker.acquire(conversation_id,
+            **({'principal': principal, 'project_id': project_id} if access is not None else {})) if conversation_id else None
+        run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id, planning_request=planning_request,
+            ownership=dict(conversation.scope['ownership']) if access is not None and conversation is not None else None)
         run.emit('queued')
         try:
             if self.store is not None:
@@ -104,6 +131,7 @@ class RunManager:
             run.execution = asyncio.create_task(self.worker(run.question,
                 self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
                 **({"conversation":conversation} if conversation is not None else {}),
+                **({'principal': run.ownership['owner_id']} if run.ownership else {}),
                 **({'planning_request': run.planning_request} if run.planning_request is not None else {})))
             record = await run.execution
             selection = record.get("conversation")
@@ -141,7 +169,11 @@ class RunManager:
                 if conversation is not None:
                     conversation.busy = False
 
-    def cancel(self, run):
+    def cancel(self, run, *, principal=None):
+        self.get(run.run_id, principal=principal)
+        return self._cancel(run)
+
+    def _cancel(self, run):
         if run.state in ('queued', 'running'):
             run.cancel_requested = True
             run.state = 'cancelling'
@@ -153,5 +185,5 @@ class RunManager:
     async def close(self):
         self.closed = True
         for run in self.runs.values():
-            self.cancel(run)
+            self._cancel(run)
         await asyncio.gather(*(r.task for r in self.runs.values() if r.task), return_exceptions=True)

@@ -15,8 +15,9 @@ def main():
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
     token = os.environ.get('BUSINESS_API_TOKEN')
-    if not token:
-        parser.error('Set BUSINESS_API_TOKEN')
+    grants = json.loads(os.environ.get('BUSINESS_GRANTS', '{}'))
+    if not token and not grants:
+        parser.error('Set BUSINESS_API_TOKEN or BUSINESS_GRANTS')
     records = json.loads(Path(__file__).with_name('records.json').read_text())
     args.log.parent.mkdir(parents=True, exist_ok=True)
     with args.log.open('x', encoding='utf-8') as log:
@@ -30,10 +31,15 @@ def main():
                          and (len(segments) == 5 or segments[5] == 'events'))
                 oid = segments[4] if valid else None
                 kind = 'events' if valid and len(segments) == 6 else 'status'
-                authorized = hmac.compare_digest(self.headers.get('Authorization', ''), f'Bearer {token}')
+                credential = self.headers.get('Authorization', '')
+                permitted = next((set(ids) for secret, ids in grants.items()
+                    if hmac.compare_digest(credential, f'Bearer {secret}')), None)
+                authorized = permitted is not None if grants else hmac.compare_digest(credential, f'Bearer {token}')
                 code, body = 200, None
                 if not authorized:
                     code = 401
+                elif permitted is not None and oid not in permitted:
+                    code = 403
                 elif args.mode == 'forbidden':
                     code = 403
                 elif args.mode == 'limited':

@@ -41,13 +41,14 @@ def checked_catalog(tools):
 
 
 class MCPBusinessClient:
-    def __init__(self, base_url, token):
-        bound = BusinessClient(base_url, token)
+    def __init__(self, base_url, token, *, allowed_orders=None):
+        bound = BusinessClient(base_url, token, **({'allowed_orders': allowed_orders} if allowed_orders is not None else {}))
         self.base_url, self.allowed_orders = bound.base_url, bound.allowed_orders
         self.observations = []
         self.catalog = []
-        env = {k: v for k, v in os.environ.items() if not k.startswith(('MODEL_', 'OPENAI_', 'BUSINESS_'))}
-        env.update(BUSINESS_API_URL=bound.base_url, BUSINESS_API_TOKEN=token)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('MODEL_', 'OPENAI_', 'BUSINESS_', 'AGENT_'))}
+        env.update(BUSINESS_API_URL=bound.base_url, BUSINESS_API_TOKEN=token,
+            BUSINESS_ALLOWED_ORDERS=json.dumps(sorted(bound.allowed_orders)))
         self.server = MCPServerStdio(params={'command': sys.executable,
             'args': ['-m', 'repo_agent.mcp_business'], 'env': env},
             name='teaching-business', client_session_timeout_seconds=5, max_retry_attempts=0)
@@ -124,7 +125,10 @@ class MCPBusinessClient:
 
 
 def serve():
-    client = BusinessClient(os.environ['BUSINESS_API_URL'], os.environ['BUSINESS_API_TOKEN'])
+    allowed = json.loads(os.environ.get('BUSINESS_ALLOWED_ORDERS', '["o-999", "o-1000", "o-404"]'))
+    if not isinstance(allowed, list) or any(not isinstance(v, str) for v in allowed):
+        raise ValueError('Invalid service scope')
+    client = BusinessClient(os.environ['BUSINESS_API_URL'], os.environ['BUSINESS_API_TOKEN'], allowed_orders=frozenset(allowed))
     app = MCPServer('teaching-business')
 
     @app.tool()
