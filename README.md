@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-第 17 讲固定入口为 `lesson-17-planning-20261117`。当前应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
+第 17 讲固定入口为 `lesson-17-planning-20261117-r1`。当前应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
 
 这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。当前仍只读：不修改源码、不执行业务写动作，不具备用户身份授权、人工审批、隔离执行、外部副作用恢复或生产部署能力。
 
@@ -27,11 +27,11 @@
 需要 Git、Python 3.12、uv、ripgrep。第一次获取：
 
 ```bash
-git clone --branch lesson-17-planning-20261117 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
+git clone --branch lesson-17-planning-20261117-r1 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
 ```
 
-已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-17-planning-20261117` 和 `git switch --detach lesson-17-planning-20261117`。已发布标签保持原义，后续修订使用新标签。
+已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-17-planning-20261117-r1` 和 `git switch --detach lesson-17-planning-20261117-r1`。已发布标签保持原义，后续修订使用新标签。
 
 在根目录 `.env` 或进程环境配置 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。`.env.example` 是空值模板，程序不读取模板；已有 `.env` 不要覆盖，密钥不提交也不写进命令。模型需支持 Chat Completions 工具调用和本讲的结构化输出组合，标识 `auto` 不保证服务端模型身份稳定。
 

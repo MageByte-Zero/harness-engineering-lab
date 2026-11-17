@@ -1,6 +1,6 @@
 # 修改计划：从需求到待人工审查产物
 
-使用同一 `repo_agent`、SDK Runner 和 `12_app.py`。第17讲基线为 `lesson-16-mcp-20261117`；本讲固定版本为 `lesson-17-planning-20261117`。依赖沿用锁文件中的 Agents SDK 0.24.0、MCP 2.3.0 和 Python 3.12，无新增依赖。
+使用同一 `repo_agent`、SDK Runner 和 `12_app.py`。第17讲基线为 `lesson-16-mcp-20261117`；本讲固定版本为 `lesson-17-planning-20261117-r1`。依赖沿用锁文件中的 Agents SDK 0.24.0、MCP 2.3.0 和 Python 3.12，无新增依赖。
 
 ## 环境与一条命令
 
