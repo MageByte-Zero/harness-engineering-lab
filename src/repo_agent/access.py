@@ -22,10 +22,11 @@ class Project:
 
 
 class AccessPolicy:
-    def __init__(self, projects, memberships, credentials):
+    def __init__(self, projects, memberships, credentials, approvers=None):
         self.projects = projects
         self.memberships = memberships
         self._credentials = credentials
+        self.approvers = approvers if approvers is not None else {}
 
     def authenticate(self, credential):
         if not isinstance(credential, str) or not credential.isascii() or not 1 <= len(credential) <= 256:
@@ -42,6 +43,11 @@ class AccessPolicy:
         if not ownership or ownership.get('owner_id') != principal:
             raise AccessDenied('Resource unavailable')
         return self.project(principal, ownership.get('project_id'))
+
+    def require_approver(self, principal, project_id):
+        self.project(principal, project_id)
+        if principal not in self.approvers.get(project_id, ()):
+            raise AccessDenied('Resource unavailable')
 
     def can_read(self, principal, ownership):
         try:
@@ -61,6 +67,7 @@ class AccessConfig(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     projects: dict[str, ProjectConfig]
     memberships: dict[str, list[str]]
+    approvers: dict[str, list[str]] = {}
 
 
 def load_local_access(config_path: Path, credential_path: Path, business_url: str):
@@ -69,6 +76,10 @@ def load_local_access(config_path: Path, credential_path: Path, business_url: st
     if not config.projects or not config.memberships or any(
             p not in config.projects for ids in config.memberships.values() for p in ids):
         raise ValueError('Invalid project grants')
+    if any(project_id not in config.projects or any(
+            project_id not in config.memberships.get(actor, ()) for actor in actors)
+            for project_id, actors in config.approvers.items()):
+        raise ValueError('Invalid approver grants')
     credential_path.parent.mkdir(parents=True, exist_ok=True)
     if not credential_path.exists():
         credentials = {'users': {actor: secrets.token_urlsafe(32) for actor in config.memberships},
@@ -87,4 +98,5 @@ def load_local_access(config_path: Path, credential_path: Path, business_url: st
     if any(not p.is_dir() for project in projects.values() for p in project.sources.values()):
         raise ValueError('Project source directory missing')
     return AccessPolicy(projects, {a: frozenset(ids) for a, ids in config.memberships.items()},
-        {a: credentials['users'][a] for a in config.memberships})
+        {a: credentials['users'][a] for a in config.memberships},
+        {p: frozenset(actors) for p, actors in config.approvers.items()})

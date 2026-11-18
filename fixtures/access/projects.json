@@ -3,5 +3,6 @@
     "alpha": {"sources": {"code": "../order-service", "policy": "../order-policy"}, "allowed_orders": ["o-999", "o-404"]},
     "beta": {"sources": {"code": "../other-project"}, "allowed_orders": ["o-1000"]}
   },
-  "memberships": {"alice": ["alpha"], "bob": ["alpha", "beta"]}
+  "memberships": {"alice": ["alpha"], "bob": ["alpha", "beta"]},
+  "approvers": {"alpha": ["bob"]}
 }

@@ -9,21 +9,25 @@
 增加固定 message=订单不存在，不暴露异常信息或订单编号。
 正常查询响应保持不变。</textarea><label for="acceptance">怎样核对修改结果（每行一条，最多 8 条）</label><textarea id="acceptance" rows="3" maxlength="4000">查询不存在订单，检查 404、原 code、固定 message，响应不含内部异常。
 查询存在订单，对照修改前的状态码与业务字段。</textarea><label for="open-questions">尚未确认、会影响方案的问题（每行一条，可留空）</label><textarea id="open-questions" rows="2" maxlength="4000"></textarea><p class="muted">这里只提出计划，供人审查。不会修改文件或执行测试。</p></div><button id="submit-label">开始调查</button></form></section>
-<section><form id="attach"><label for="run-id">重新查看运行</label><input id="run-id" placeholder="粘贴运行编号" required><button class="secondary">连接进度</button></form></section><div id="runs"></div></main>
+<section><form id="attach"><label for="run-id">重新查看运行</label><input id="run-id" placeholder="粘贴运行编号" required><button class="secondary">连接进度</button></form></section><section id="approval-panel" hidden>
+<h2>计划审批</h2>
+<button type="button" id="reload-approvals" class="secondary">刷新审批</button>
+<div id="approvals"></div>
+</section><div id="runs"></div></main>
 <script>
 const terminal=new Set(['completed','failed','cancelled','interrupted']);
 const labels={queued:'等待开始',running:'处理中',cancelling:'正在请求停止',completed:'执行结束',failed:'结果不可用',cancelled:'已停止',interrupted:'进程中断，请重新发起'};
 const kinds={answer_for_review:'回答待审阅',needs_information:'信息不足',unavailable:'结果不可用',plan_for_review:'修改计划 · 待人工审查',plan_needs_information:'计划需要补充条件'};
 const eventNames={queued:'运行已创建',running:'运行开始',model_started:'等待模型响应',tool_requested:'模型请求工具',tool_started:'工具开始执行',tool_finished:'工具已返回',cancel_requested:'取消已请求',completed:'执行结束',failed:'结果不可用',cancelled:'执行已停止',interrupted:'上次进程已中断，未自动重放'};
-const connections=new Map();let conversationEnabled=false;let conversationVersion=0;let authenticatedMode=false;
-async function start(){const c=await api('/capabilities');conversationEnabled=c.conversations;authenticatedMode=c.authentication;document.querySelector('#auth-panel').hidden=!authenticatedMode;if(c.persistence)document.querySelector('#storage-hint').textContent='会话与结果保存在本地数据目录，重启后可重新查看。';if(authenticatedMode){try{await signedIn()}catch{setLoggedIn(false)}}else{document.querySelector('#conversation-panel').hidden=!conversationEnabled;if(conversationEnabled)await loadConversations()}}
-function clearWorkspace(){for(const area of document.querySelectorAll('textarea'))area.value='';document.querySelector('#error').textContent='';for(const es of connections.values())es.close();connections.clear();conversationVersion++;document.querySelector('#runs').replaceChildren();document.querySelector('#saved-runs').replaceChildren();document.querySelector('#conversation-id').value='';document.querySelector('#run-id').value='';document.querySelector('#saved-conversations').replaceChildren()}
-function setLoggedIn(yes){document.querySelector('#login').hidden=yes;document.querySelector('#identity-panel').hidden=!yes;for(const el of document.querySelectorAll('main > section:not(#auth-panel)'))el.hidden=!yes;document.querySelector('#conversation-panel').hidden=!yes||!conversationEnabled}
-async function signedIn(){const s=await api('/session');document.querySelector('#actor').textContent='当前身份：'+s.principal;const menu=document.querySelector('#project');menu.replaceChildren();for(const id of s.projects){const o=node('option',id);o.value=id;menu.append(o)}clearWorkspace();setLoggedIn(true);if(s.projects.length)await loadConversations();else showError(Error('当前身份没有获准项目'))}
+const connections=new Map();let conversationEnabled=false;let conversationVersion=0;let authenticatedMode=false;let approvalEnabled=false;let approvalVersion=0;
+async function start(){const c=await api('/capabilities');conversationEnabled=c.conversations;authenticatedMode=c.authentication;approvalEnabled=c.approvals;document.querySelector('#auth-panel').hidden=!authenticatedMode;if(c.persistence)document.querySelector('#storage-hint').textContent='会话与结果保存在本地数据目录，重启后可重新查看。';if(authenticatedMode){try{await signedIn()}catch{setLoggedIn(false)}}else{document.querySelector('#conversation-panel').hidden=!conversationEnabled;if(conversationEnabled)await loadConversations()}}
+function clearWorkspace(){for(const area of document.querySelectorAll('textarea'))area.value='';document.querySelector('#error').textContent='';for(const es of connections.values())es.close();connections.clear();conversationVersion++;approvalVersion++;document.querySelector('#approvals').replaceChildren();document.querySelector('#runs').replaceChildren();document.querySelector('#saved-runs').replaceChildren();document.querySelector('#conversation-id').value='';document.querySelector('#run-id').value='';document.querySelector('#saved-conversations').replaceChildren()}
+function setLoggedIn(yes){document.querySelector('#login').hidden=yes;document.querySelector('#identity-panel').hidden=!yes;for(const el of document.querySelectorAll('main > section:not(#auth-panel)'))el.hidden=!yes;document.querySelector('#conversation-panel').hidden=!yes||!conversationEnabled;document.querySelector('#approval-panel').hidden=!yes||!approvalEnabled}
+async function signedIn(){const s=await api('/session');document.querySelector('#actor').textContent='当前身份：'+s.principal;const menu=document.querySelector('#project');menu.replaceChildren();for(const id of s.projects){const o=node('option',id);o.value=id;menu.append(o)}clearWorkspace();setLoggedIn(true);await loadApprovals();if(s.projects.length)await loadConversations();else showError(Error('当前身份没有获准项目'))}
 function projectQuery(){return authenticatedMode?'?project_id='+encodeURIComponent(document.querySelector('#project').value):''}
 document.querySelector('#login').onsubmit=async e=>{e.preventDefault();try{await api('/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:document.querySelector('#credential').value})});document.querySelector('#credential').value='';document.querySelector('#error').textContent='';await signedIn()}catch(e){showError(e)}};
 document.querySelector('#logout').onclick=async()=>{try{await api('/session',{method:'DELETE'});clearWorkspace();setLoggedIn(false)}catch(e){showError(e)}};
-document.querySelector('#project').onchange=()=>{clearWorkspace();loadConversations().catch(showError)};
+document.querySelector('#project').onchange=()=>{clearWorkspace();Promise.all([loadConversations(),loadApprovals()]).catch(showError)};
 start().catch(showError);
 async function loadConversations(selected){const version=++conversationVersion;const list=(await api('/conversations')).filter(c=>!authenticatedMode||c.project_id===document.querySelector('#project').value);if(version!==conversationVersion)return;if(!list.length){await newConversation();return}const menu=document.querySelector('#saved-conversations');menu.replaceChildren();for(const c of list){const o=node('option',c.conversation_id+' · '+c.turn_count+' 轮'+(c.scope_matches?'':' · 资料范围已变化'));o.value=c.conversation_id;menu.append(o)}menu.value=selected||list.at(-1).conversation_id;await selectConversation()}
 async function selectConversation(){const version=++conversationVersion;const id=document.querySelector('#saved-conversations').value;document.querySelector('#conversation-id').value=id;const list=await api('/conversations/'+encodeURIComponent(id)+'/runs');if(version!==conversationVersion)return;const box=document.querySelector('#saved-runs');box.replaceChildren(node('p','已有运行（点击查看结果）：'));for(const r of list){const b=node('button',r.question+' · '+(labels[r.state]||r.state));b.className='secondary';b.onclick=()=>{document.querySelector('#run-id').value=r.run_id;watch(r.run_id).catch(showError)};box.append(b)}}
@@ -38,7 +42,7 @@ async function watch(id){
  const box=node('section','');box.append(node('h2','运行 '+id));const status=node('p','正在连接');status.className='state';const cancel=node('button','请求取消');cancel.className='secondary';box.append(status,cancel);const log=node('ol','');box.append(log);const result=node('article','');box.append(result);document.querySelector('#runs').prepend(box);
  let es;async function refresh(){let run=await api('/runs/'+encodeURIComponent(id));status.textContent=labels[run.state]||run.state;cancel.disabled=terminal.has(run.state)||run.cancel_requested;
  if(run.context_selection&&run.context_selection.omitted_turns)status.textContent+=' · 已省略 '+run.context_selection.omitted_turns+' 轮历史';
- if(run.result){result.replaceChildren(node('h3',kinds[run.result.kind]||run.result.kind));if(run.result.artifact)renderPlan(result,run.result);if(run.result.conclusion)result.append(node('p',run.result.conclusion));if(run.result.facts?.length){let facts=node('ul','');for(let f of run.result.facts)facts.append(node('li',f.statement+' ['+f.source_ids.join(', ')+']'));result.append(facts)}if(run.result.gaps?.length)result.append(node('p','缺口：'+run.result.gaps.join('；')));if(run.result.kind!=='unavailable'&&!run.result.artifact)result.append(node('p','来源关联经过程序检查，回答含义仍需审阅。'));let details=node('details','');details.append(node('summary','查看来源、检查与完整结果'),node('pre',JSON.stringify(run.result,null,2)));result.append(details)}
+ if(run.result){result.replaceChildren(node('h3',kinds[run.result.kind]||run.result.kind));if(run.result.artifact)renderPlan(result,run.result);if(approvalEnabled&&run.result.kind==='plan_for_review')addReviewForm(result,run);if(run.result.conclusion)result.append(node('p',run.result.conclusion));if(run.result.facts?.length){let facts=node('ul','');for(let f of run.result.facts)facts.append(node('li',f.statement+' ['+f.source_ids.join(', ')+']'));result.append(facts)}if(run.result.gaps?.length)result.append(node('p','缺口：'+run.result.gaps.join('；')));if(run.result.kind!=='unavailable'&&!run.result.artifact)result.append(node('p','来源关联经过程序检查，回答含义仍需审阅。'));let details=node('details','');details.append(node('summary','查看来源、检查与完整结果'),node('pre',JSON.stringify(run.result,null,2)));result.append(details)}
  if(terminal.has(run.state)&&es){es.close();connections.delete(id)}return run}
  cancel.onclick=async()=>{try{await api('/runs/'+id+'/cancel',{method:'POST'});await refresh()}catch(e){showError(e)}};
  try{const run=await refresh();if(terminal.has(run.state))return;es=new EventSource('/runs/'+encodeURIComponent(id)+'/events');connections.set(id,es);es.onmessage=async e=>{let v=JSON.parse(e.data);log.append(node('li',(eventNames[v.kind]||v.kind)+(v.data.tool?' · '+v.data.tool:'')+(v.data.status?' · '+v.data.status:'')));if(terminal.has(v.kind)){es.close();connections.delete(id);try{await refresh();if(conversationEnabled)await loadConversations(document.querySelector('#conversation-id').value)}catch(e){showError(e)}}};es.onerror=()=>{status.textContent='进度连接中断，可使用运行编号重新连接';es.close();connections.delete(id);refresh().catch(showError)}
@@ -55,8 +59,91 @@ function renderPlan(box,r){
  const constraints=node('ul','');for(const c of r.request.constraints)constraints.append(node('li',c.text));box.append(node('h4','输入约束'),constraints);
  const steps=node('ol','');for(const s of r.steps){const li=node('li',s.title+' · '+s.target);li.append(node('p',s.change));const refs=s.constraint_ids.map(id=>r.request.constraints.find(c=>c.id===id)?.text||id);li.append(node('p','关联约束：'+refs.join('；')));steps.append(li)}if(r.steps.length)box.append(node('h4','建议步骤'),steps);
  const checks=node('ol','');for(const c of r.checks){const text=r.request.acceptance.find(a=>a.id===c.acceptance_id)?.text||c.acceptance_id;const li=node('li',text);li.append(node('p','核对方法：'+c.method),node('p','预期结果：'+c.expected));checks.append(li)}if(r.checks.length)box.append(node('h4','后续独立检查'),checks);
- const questions=[...new Set([...r.request.open_questions,...r.questions])];if(questions.length){const ul=node('ul','');for(const q of questions)ul.append(node('li',q));box.append(node('h4','待确认问题'),ul)}
+ const questions=[...new Set([...r.request.open_questions,...(r.questions||[])])];if(questions.length){const ul=node('ul','');for(const q of questions)ul.append(node('li',q));box.append(node('h4','待确认问题'),ul)}
  if(r.tradeoffs.length)box.append(node('p','取舍：'+r.tradeoffs.join('；')));
- box.append(node('p','计划版本：'+r.artifact.revision.slice(0,12)),node('p','格式、来源关联与覆盖经过程序检查；方案含义仍需人工审查。尚未批准或执行。'));
+ box.append(node('p','计划版本：'+r.artifact.revision.slice(0,12)),node('p','格式、来源关联与覆盖经过程序检查。审批状态见审批记录。'));
 }
+
+const approvalLabels={pending:'待审批',approved:'已批准',rejected:'已拒绝',withdrawn:'已撤回'};
+async function approvalPost(url, body){
+ const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(!response.ok){
+  const error=await response.json();
+  throw Error(response.status===409 ? '审批请求冲突（'+error.detail+'）' : '审批请求失败（'+response.status+'）');
+ }
+ return response.json();
+}
+function addReviewForm(box,run){
+ const form=document.createElement('form');
+ const label=node('label','审批人账号');
+ const input=document.createElement('input');
+ input.required=true;
+ input.maxLength=64;
+ label.append(input);
+ const button=node('button','送审');
+ const status=node('p','');
+ form.append(label,button,status);
+ form.onsubmit=async event=>{
+  event.preventDefault();
+  button.disabled=true;
+  try{
+   const approval=await approvalPost('/runs/'+encodeURIComponent(run.run_id)+'/approval',
+    {reviewer_id:input.value.trim(),plan_revision:run.result.artifact.revision});
+   status.textContent='已送审 '+approval.approval_id;
+   await loadApprovals();
+  }catch(error){showError(error)}
+  finally{button.disabled=false}
+ };
+ box.append(form);
+}
+async function loadApprovals(){
+ if(!approvalEnabled||document.querySelector('#approval-panel').hidden)return;
+ const version=++approvalVersion;
+ const records=await api('/approvals');
+ if(version!==approvalVersion)return;
+ const box=document.querySelector('#approvals');
+ box.replaceChildren();
+ if(!records.length)box.append(node('p','暂无审批记录'));
+ for(const record of records){
+  const card=node('article','');
+  card.append(node('h3',approvalLabels[record.state]+(record.expired?' · 已超时':'')),
+   node('p','申请 '+record.approval_id),
+   node('p',record.project_id+' · '+record.owner_id+' 送审 · '+record.reviewer_id+' 审批'),
+   node('p','动作 '+record.action+' · '+record.targets.join('、')),
+   node('p','版本 '+record.plan_revision),node('p','快照 '+record.snapshot_id),
+   node('p','有效期至 '+new Date(record.expires_at).toLocaleString()));
+  const details=node('details','');
+  details.append(node('summary','查看送审计划'));
+  renderPlan(details,{...record.plan,artifact:{revision:record.plan_revision}});
+  if(record.plan.facts.length){
+   const facts=node('ul','');
+   for(const fact of record.plan.facts)facts.append(node('li',fact.statement+' ['+fact.source_ids.join(', ')+']'));
+   details.append(node('h4','计划依据'),facts);
+  }
+  card.append(details);
+  if(record.decided_by)card.append(node('p','处理人 '+record.decided_by+' · '+new Date(record.decided_at).toLocaleString()));
+  if(record.handoff_id)card.append(node('p','交接记录 '+record.handoff_id));
+  const controls=node('div','');
+  function addButton(text,path,body){
+   const button=node('button',text);
+   button.type='button';
+   button.onclick=async()=>{
+    for(const child of controls.children)child.disabled=true;
+    try{
+     await approvalPost('/approvals/'+encodeURIComponent(record.approval_id)+path,{...body,plan_revision:record.plan_revision});
+     await loadApprovals();
+    }catch(error){showError(error);await loadApprovals().catch(showError)}
+    finally{for(const child of controls.children)child.disabled=false}
+   };
+   controls.append(button);
+  }
+  if(record.can_decide){
+   addButton('批准本版本','/decision',{decision:'approve'});
+   addButton('拒绝','/decision',{decision:'reject'});
+  }
+  if(record.can_withdraw)addButton('撤回','/withdraw',{});
+  card.append(controls);box.append(card);
+ }
+}
+document.querySelector('#reload-approvals').onclick=()=>loadApprovals().catch(showError);
 </script></html>

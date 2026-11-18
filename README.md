@@ -4,9 +4,9 @@
 
 ## 当前实现
 
-第 18 讲固定入口为 `lesson-18-authorization-20261117`。当前应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
+第 19 讲固定入口为 `lesson-19-approval-20261118`。当前应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
 
-这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。当前仍只读：不修改源码、不执行业务写动作，已接入可选的本地身份与项目访问控制；不具备企业 SSO、人工审批、隔离执行、外部副作用恢复或生产部署能力。
+这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。当前仍只读：不修改源码、不执行业务写动作，已接入可选的本地身份、项目访问控制和人工审批。批准后保存版本绑定的交接记录，隔离执行和外部动作留到后续版本。
 
 | 源文件 | 当前职责 |
 | --- | --- |
@@ -17,22 +17,23 @@
 | `business.py`、`mcp_business.py` | 合成业务 HTTP 客户端、只读工具及固定 MCP 适配 |
 | `output.py`、`checks.py` | 结构化结果、来源关联和离线记录核对 |
 | `planning.py` | 需求与计划类型、提交工具、关联/覆盖检查和产物版本绑定 |
+| `approval.py` | 计划送审、指定审批人、决定校验与交接 |
 | `application.py`、`web.py` | 用例与 Run 状态；FastAPI、SSE 和取消接口 |
 | `conversation.py`、`persistence.py` | 完整轮次选择/提交、SQLite 存储、重启与范围校验 |
 | `skills.py` | 受信本地任务方法包的按需加载和内容版本绑定 |
 
-包内有 17 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出，不是另一套应用。
+包内有 18 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出，不是另一套应用。
 
 ## 获取固定版本与最小运行
 
 需要 Git、Python 3.12、uv、ripgrep。第一次获取：
 
 ```bash
-git clone --branch lesson-18-authorization-20261117 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
+git clone --branch lesson-19-approval-20261118 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
 ```
 
-已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-18-authorization-20261117` 和 `git switch --detach lesson-18-authorization-20261117`。已发布标签保持原义，后续修订使用新标签。
+已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-19-approval-20261118` 和 `git switch --detach lesson-19-approval-20261118`。已发布标签保持原义，后续修订使用新标签。
 
 在根目录 `.env` 或进程环境配置 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。`.env.example` 是空值模板，程序不读取模板；已有 `.env` 不要覆盖，密钥不提交也不写进命令。模型需支持 Chat Completions 工具调用和本讲的结构化输出组合，标识 `auto` 不保证服务端模型身份稳定。
 
@@ -45,7 +46,7 @@ uv run --frozen python examples/repo_reading/12_app.py \
   --port 18064 --business-port 18824
 ```
 
-打开 http://127.0.0.1:18064；首次启动的预发凭据在 `runs/project-access/local-credentials.json`，不要公开或提交。用户凭据、项目选择、有权规划、越权拒绝、CLI、MCP 与重启步骤见[第18讲运行说明](examples/repo_reading/18_README.md)。Alice 仅能请求 alpha；Bob 能请求 alpha/beta，但会话和结果默认各自私有。源目录、业务凭据和允许订单由可信配置决定，模型不能选择。
+打开 http://127.0.0.1:18064；首次启动的预发凭据在 `runs/project-access/local-credentials.json`，不要公开或提交。用户凭据、项目选择、有权规划、越权拒绝、CLI、MCP 与重启步骤见[第18讲运行说明](examples/repo_reading/18_README.md)。Alice 仅能请求 alpha，Bob 能请求 alpha/beta，会话和结果各自私有。Bob 另获 alpha 审批权限，只能处理明确指定给他的申请。源目录、业务凭据和允许订单由可信配置决定，模型不能选择。
 
 这是本地预发凭据示例，不是企业 SSO。成员配置与凭据轮换在重启后生效；退出浏览器仅清除当前 Cookie 和显示内容，不吊销该凭据。旧的无归属数据保留但不开放。带归属的数据目录不能去掉访问配置后通过旧模式打开。旧命令不带 `--access-config` 时仍用于可信本地单用户演示，不能当团队授权入口。
 
@@ -73,11 +74,12 @@ MCP Python 2.3.0、Agents SDK 0.24.0 与其余依赖由 `uv.lock` 固定。MCP �
 - [第15讲](examples/repo_reading/15_README.md)、[第16讲](examples/repo_reading/16_README.md)：任务方法与 MCP。
 - [第17讲](examples/repo_reading/17_README.md)：修改计划、来源与覆盖检查、保存和重启查看。
 - [第18讲](examples/repo_reading/18_README.md)：可信身份、项目取材、私有会话/结果、HTTP/MCP 授权和撤权重启。
+- [第19讲](examples/repo_reading/19_README.md)：持久送审、批准与拒绝、一次性交接和重启后的恢复验证。
 
 历史固定版本保持不变。`lesson-04-sdk-20261025` / `lesson-05-sdk-20261025` 是 SDK 起步版；`lesson-16-mcp-20261117` 是第17讲基线。迁移前 LangChain 实现可从 `69d2233` 历史查看，不在当前源码中并行维护。
 
 ## 后续架构与仓库边界
 
-后续沿同一应用接入人工确认、受限执行、独立验证和恢复，再完善评测、发布与部署。按出现的职责逐步分包，不预建空目录或通用工作流平台。当前只有一个循环拥有者，不把 Codex SDK/App Server 当作普通模型 URL 替换。
+后续沿同一应用接入受限执行、独立验证和恢复，再完善评测、发布与部署。按出现的职责逐步分包。当前模型执行仍由同一个 SDK Runner 驱动。
 
 本公开仓库只保存源码、测试、合成输入、配置样例与开发者说明。付费正文、配图和写作证据在独立私有文稿库；真实运行副本、日志和补丁归入忽略的 `runs/<run-id>`，密钥和企业数据不发布。`fixtures/order-service` 与 `fixtures/order-service-missing` 是两个验收输入，均需保留。旧 `team_harness` 等工程仅查 Git 历史，不恢复平行应用；具体开发约束见 [AGENTS.md](AGENTS.md)。

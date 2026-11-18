@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -13,6 +14,8 @@ from repo_agent.application import CapacityExceeded
 from repo_agent.conversation import ConversationBusy, ConversationScopeChanged
 from repo_agent.planning import PlanningRequest
 from repo_agent.access import AccessDenied
+from repo_agent.approval import PlanApprovals
+from repo_agent.persistence import ApprovalConflict
 
 
 class Submission(BaseModel):
@@ -23,8 +26,22 @@ class Submission(BaseModel):
     project_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class ApprovalRevision(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    plan_revision: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+class ReviewSubmission(ApprovalRevision):
+    reviewer_id: str = Field(min_length=1, max_length=64)
+
+
+class ReviewDecision(ApprovalRevision):
+    decision: Literal['approve', 'reject']
+
+
 def create_app(manager):
     access = getattr(manager.worker, 'access', None)
+    approvals = PlanApprovals(manager, manager.store, access) if access is not None and manager.store is not None else None
     @asynccontextmanager
     async def lifespan(app):
         yield
@@ -60,6 +77,15 @@ def create_app(manager):
     async def denied(request, exc):
         return JSONResponse({'detail': 'Resource unavailable'}, status_code=403)
 
+    @app.exception_handler(ApprovalConflict)
+    async def approval_conflict(request, exc):
+        return JSONResponse({'detail': str(exc)}, status_code=409)
+
+    def approval_service():
+        if approvals is None:
+            raise HTTPException(404, 'Approvals require persistent project access')
+        return approvals
+
     def find(run_id, principal=None):
         if access is not None:
             return manager.get(run_id, principal=principal)
@@ -70,7 +96,7 @@ def create_app(manager):
     @app.get('/capabilities')
     async def capabilities():
         return {'conversations':hasattr(manager.worker, 'create'), 'persistence':manager.store is not None,
-                'authentication': access is not None}
+                'authentication': access is not None, 'approvals': approvals is not None}
 
     @app.post('/session')
     async def login(request: Request):
@@ -156,6 +182,26 @@ def create_app(manager):
     @app.get('/runs/{run_id}')
     async def status(run_id: str, request: Request):
         return find(run_id, request.state.principal).view()
+
+    @app.post('/runs/{run_id}/approval', status_code=201)
+    async def submit_review(run_id: str, body: ReviewSubmission, request: Request):
+        return approval_service().submit(request.state.principal, run_id, body.plan_revision, body.reviewer_id)
+
+    @app.get('/approvals')
+    async def list_approvals(request: Request):
+        return approval_service().visible(request.state.principal)
+
+    @app.get('/approvals/{approval_id}')
+    async def get_approval(approval_id: str, request: Request):
+        return approval_service().get(request.state.principal, approval_id)
+
+    @app.post('/approvals/{approval_id}/decision')
+    async def decide_approval(approval_id: str, body: ReviewDecision, request: Request):
+        return approval_service().decide(request.state.principal, approval_id, body.plan_revision, body.decision)
+
+    @app.post('/approvals/{approval_id}/withdraw')
+    async def withdraw_approval(approval_id: str, body: ApprovalRevision, request: Request):
+        return approval_service().withdraw(request.state.principal, approval_id, body.plan_revision)
 
     @app.post('/runs/{run_id}/cancel', status_code=202)
     async def cancel(run_id: str, request: Request):

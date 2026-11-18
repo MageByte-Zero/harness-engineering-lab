@@ -17,6 +17,10 @@ class HistoryUnavailable(RuntimeError):
     pass
 
 
+class ApprovalConflict(RuntimeError):
+    pass
+
+
 def message_digest(items):
     return sha256(json.dumps(items, ensure_ascii=False, sort_keys=True,
         separators=(',', ':')).encode()).hexdigest()
@@ -40,7 +44,7 @@ class LocalStore:
             self.db = sqlite3.connect(self.database, check_same_thread=False)
             self.db.execute('PRAGMA foreign_keys=ON')
             self.db.execute('PRAGMA journal_mode=WAL')
-            if self.db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1):
+            if self.db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1, 2):
                 raise ValueError('Unsupported application storage version')
             self.db.executescript('''
                 CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, scope TEXT NOT NULL);
@@ -50,7 +54,14 @@ class LocalStore:
                     conversation_id TEXT NOT NULL REFERENCES conversations(id),
                     run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
                     message_count INTEGER NOT NULL, digest TEXT NOT NULL);
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS approvals (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+                    binding TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(state IN ('pending', 'approved', 'rejected', 'withdrawn')),
+                    decided_by TEXT, decided_at TEXT);
+                CREATE TABLE IF NOT EXISTS handoffs (
+                    id TEXT PRIMARY KEY, approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(id));
+                PRAGMA user_version=2;
             ''')
             self.records.mkdir(exist_ok=True)
             self._recover_interrupted()
@@ -107,6 +118,39 @@ class LocalStore:
                 events.append({'seq': len(events) + 1, 'run_id': view['run_id'],
                     'at': datetime.now(timezone.utc).isoformat(), 'kind': 'interrupted', 'data': {}})
                 self.save_run(view, events)
+
+    def add_approval(self, approval_id, run_id, binding):
+        with self.db:
+            result = self.db.execute(
+                'INSERT INTO approvals(id,run_id,binding) VALUES (?,?,?) ON CONFLICT(run_id) DO NOTHING',
+                (approval_id, run_id, json.dumps(binding, ensure_ascii=False)))
+            if result.rowcount != 1:
+                raise ApprovalConflict('This plan has already been submitted for review')
+
+    def approvals(self, approval_id=None):
+        query = ('SELECT a.id,a.binding,a.state,a.decided_by,a.decided_at,h.id '
+                 'FROM approvals a LEFT JOIN handoffs h ON a.id=h.approval_id')
+        args = ()
+        if approval_id is not None:
+            query += ' WHERE a.id=?'
+            args = (approval_id,)
+        return [{'approval_id': identity, **json.loads(binding), 'state': state,
+                 'decided_by': actor, 'decided_at': at, 'handoff_id': handoff_id}
+                for identity, binding, state, actor, at, handoff_id in self.db.execute(query, args)]
+
+    def decide_approval(self, approval_id, state, principal, at):
+        if state not in ('approved', 'rejected', 'withdrawn'):
+            raise ValueError('Invalid decision')
+        # A failed handoff insert rolls back the decision as part of the same transaction.
+        with self.db:
+            updated = self.db.execute(
+                "UPDATE approvals SET state=?,decided_by=?,decided_at=? WHERE id=? AND state='pending'",
+                (state, principal, at, approval_id))
+            if updated.rowcount != 1:
+                raise ApprovalConflict('This approval is no longer pending')
+            if state == 'approved':
+                self.db.execute('INSERT INTO handoffs(id,approval_id) VALUES (?,?)',
+                    (approval_id + '/handoff', approval_id))
 
     async def write_history(self, run_id, items):
         session = SQLiteSession('run:' + run_id, self.messages)
