@@ -1,0 +1,15 @@
+9f096f7530ed385348d269dd9ad642dff47f50cbc758f17d69484952cdd0cbc0  org/springframework/spring-webmvc/6.1.14/spring-webmvc-6.1.14.jar
+48ba71b67835816c63bbb5ed3ab182fc837d6b2988f35ee8061346501481d928  org/springframework/spring-test/6.1.14/spring-test-6.1.14.jar
+8fbbd95e27361aa9f656bee18d32bad062b4210d584909893cbc83dd9c64f472  org/springframework/spring-web/6.1.14/spring-web-6.1.14.jar
+e15a1179fc9642ffed13ca55e2863e2da524ccd1083b7c6f1b5cfd5733f3b2c5  org/springframework/spring-core/6.1.14/spring-core-6.1.14.jar
+6cad84b2a35a33a85a313a19445a43e5432b68e4f0bbf6c2bfc4a885a93dd727  org/springframework/spring-beans/6.1.14/spring-beans-6.1.14.jar
+da76b53f6a20f09b38052a300435f3245780d30deb46ec5dd75314cda06fd365  org/springframework/spring-context/6.1.14/spring-context-6.1.14.jar
+69ed6b052397a929a0e4c452f63f2c9a3d22e046d8b80d878190205ddb259518  org/springframework/spring-expression/6.1.14/spring-expression-6.1.14.jar
+15596939a6dbcca5812dee1ab9a8b36f69536bfd80672798927d5f1ac0d384e5  org/springframework/spring-aop/6.1.14/spring-aop-6.1.14.jar
+9975c462bacee7a0c1aa79e55aa4faed02bd28dc78d1252404da87f5f7fb4cb1  org/springframework/spring-jcl/6.1.14/spring-jcl-6.1.14.jar
+721a189241dab0525d9e858e5cb604d3ecc0ede081e2de77d6f34fa5779a5b46  com/fasterxml/jackson/core/jackson-core/2.17.2/jackson-core-2.17.2.jar
+c04993f33c0f845342653784f14f38373d005280e6359db5f808701cfae73c0c  com/fasterxml/jackson/core/jackson-databind/2.17.2/jackson-databind-2.17.2.jar
+873a606e23507969f9bbbea939d5e19274a88775ea5a169ba7e2d795aa5156e1  com/fasterxml/jackson/core/jackson-annotations/2.17.2/jackson-annotations-2.17.2.jar
+a65be5dfcc3c782bf0ca28cea535c18b2260e24a773ddff053b85fc6a93c706e  io/micrometer/micrometer-commons/1.13.6/micrometer-commons-1.13.6.jar
+73f5dbd085b0a9aeed414ea6c0c1ba457337036e0e4b68a4fb5d4498683d0edd  io/micrometer/micrometer-observation/1.13.6/micrometer-observation-1.13.6.jar
+7f87f59ca35642cdda2f33bb9ecebe9754071b4d836c555966db8ca7f20c242b  org/apache/tomcat/embed/tomcat-embed-core/10.1.31/tomcat-embed-core-10.1.31.jar

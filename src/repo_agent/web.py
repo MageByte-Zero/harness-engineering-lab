@@ -18,6 +18,7 @@ from repo_agent.access import AccessDenied
 from repo_agent.approval import PlanApprovals
 from repo_agent.persistence import ApprovalConflict
 from repo_agent.editing import edit_workspace
+from repo_agent.verification import OrderVerifier, authorized_contract, verify_patch
 from repo_agent.workspace import DockerProbe, WorkspaceFailure, WorkspacePreparation
 
 
@@ -34,6 +35,11 @@ class ApprovalRevision(BaseModel):
     plan_revision: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
+class VerificationSubmission(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    repair: bool = False
+
+
 class ReviewSubmission(ApprovalRevision):
     reviewer_id: str = Field(min_length=1, max_length=64)
 
@@ -42,7 +48,8 @@ class ReviewDecision(ApprovalRevision):
     decision: Literal['approve', 'reject']
 
 
-def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_edit: bool = False):
+def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_edit: bool = False,
+               order_verifier: OrderVerifier | None = None, order_contract: dict | None = None):
     access = getattr(manager.worker, 'access', None)
     approvals = PlanApprovals(manager, manager.store, access) if access is not None and manager.store is not None else None
     workspaces = WorkspacePreparation(approvals, workspace_probe) if approvals and workspace_probe else None
@@ -110,7 +117,8 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_ed
     async def capabilities():
         return {'conversations':hasattr(manager.worker, 'create'), 'persistence':manager.store is not None,
                 'authentication': access is not None, 'approvals': approvals is not None,
-                'workspaces': workspaces is not None, 'editing': enable_edit and workspaces is not None}
+                'workspaces': workspaces is not None, 'editing': enable_edit and workspaces is not None,
+                'verification': order_verifier is not None and order_contract is not None and workspaces is not None}
 
     @app.post('/session')
     async def login(request: Request):
@@ -237,14 +245,37 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_ed
         ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
         try:
             job = partial(edit_workspace, directory, binding, plan, service.probe)
-            return manager.submit_edit(ownership, job).view()
+            return manager.submit_job('编辑已批准的工作区', ownership, job).view()
+        except CapacityExceeded as exc:
+            raise HTTPException(429, 'Run capacity reached') from exc
+
+    @app.post('/runs/{run_id}/verification', status_code=202)
+    async def verify_candidate(run_id: str, body: VerificationSubmission, request: Request):
+        if order_verifier is None or order_contract is None:
+            raise HTTPException(404, 'Independent verification is disabled')
+        principal = request.state.principal
+        run = find(run_id, principal)
+        candidate = run.result or {}
+        if run.state != 'completed' or candidate.get('kind') != 'patch_for_review':
+            raise ApprovalConflict('A completed edit candidate is required')
+        service = workspace_service()
+        directory, binding, plan = service.edit_inputs(principal, candidate['approval_id'],
+                                                       candidate['plan_revision'])
+        if any(candidate.get(key) != value for key, value in binding.items()) or candidate.get('run_id') != run_id:
+            raise ApprovalConflict('Candidate binding changed')
+        authorized_contract(binding, plan, order_contract)
+        ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
+        try:
+            job = partial(verify_patch, directory, binding, plan, service.probe, order_verifier,
+                          candidate, body.repair)
+            return manager.submit_job('独立检查订单响应', ownership, job).view()
         except CapacityExceeded as exc:
             raise HTTPException(429, 'Run capacity reached') from exc
 
     @app.get('/runs/{run_id}/patch')
     async def download_patch(run_id: str, request: Request):
         run = find(run_id, request.state.principal)
-        if run.state != 'completed' or (run.result or {}).get('kind') != 'patch_for_review':
+        if run.state != 'completed' or (run.result or {}).get('kind') not in {'patch_for_review', 'verification_for_review'}:
             raise HTTPException(404, 'No completed patch')
         return PlainTextResponse(run.result['patch'],
             headers={'Content-Disposition': f'attachment; filename="{run.run_id}.patch"'})

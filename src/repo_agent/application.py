@@ -107,17 +107,17 @@ class RunManager:
             ownership=dict(conversation.scope['ownership']) if access is not None and conversation is not None else None)
         return self._enqueue(run, conversation)
 
-    def submit_edit(self, ownership, edit):
+    def submit_job(self, question, ownership, job):
         self._check_capacity()
-        run = ActiveRun(str(uuid4()), '编辑已批准的工作区', ownership=ownership)
-        return self._enqueue(run, edit=edit)
+        run = ActiveRun(str(uuid4()), question, ownership=ownership)
+        return self._enqueue(run, job=job)
 
     def _check_capacity(self):
         if (self.closed or len(self.runs) >= self.retained_limit or
                 sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
             raise CapacityExceeded()
 
-    def _enqueue(self, run, conversation=None, *, edit=None):
+    def _enqueue(self, run, conversation=None, *, job=None):
         run.emit('queued')
         try:
             if self.store is not None:
@@ -127,10 +127,10 @@ class RunManager:
                 conversation.busy = False
             raise
         self.runs[run.run_id] = run
-        run.task = asyncio.create_task(self._execute(run, conversation, edit=edit))
+        run.task = asyncio.create_task(self._execute(run, conversation, job=job))
         return run
 
-    async def _execute(self, run, conversation=None, *, edit=None):
+    async def _execute(self, run, conversation=None, *, job=None):
         try:
             if run.cancel_requested:
                 run.state = 'cancelled'
@@ -139,7 +139,7 @@ class RunManager:
             run.emit('running')
             if self.store is not None:
                 self.store.save_run(run.view(), run.events)
-            if edit is None:
+            if job is None:
                 run.execution = asyncio.create_task(self.worker(run.question,
                     self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
                     **({"conversation": conversation} if conversation is not None else {}),
@@ -152,7 +152,7 @@ class RunManager:
                 run.result = consume_answer(record)
                 stop_reason = record['stop_reason']
             else:
-                run.execution = asyncio.create_task(edit(run.run_id, run.emit))
+                run.execution = asyncio.create_task(job(run.run_id, run.emit))
                 run.result = await run.execution
                 stop_reason = run.result.get('stop_reason')
             if stop_reason == 'workspace_cleanup_unconfirmed':

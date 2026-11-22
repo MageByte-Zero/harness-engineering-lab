@@ -82,6 +82,51 @@ def _docker(args: list[str], timeout: float, *, payload: str | None = None) -> s
                           encoding='utf-8', input=payload, timeout=timeout).stdout
 
 
+def container_args(name: str, *, memory: str, pids: int) -> list[str]:
+    args = ['create', '--name', name, '--pull=never', '--read-only', '--network=none',
+            '--user=65534:65534', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+            '--pids-limit', str(pids), '--memory', memory, '--cpus=1']
+    # The Docker client can otherwise forward proxy variables from its own config.
+    for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'NO_PROXY'):
+        args.extend(['--env', key + '=', '--env', key.lower() + '='])
+    return args
+
+
+def run_container(args: list[str], name: str, timeout: float, *, payload: str | None = None) -> dict:
+    created = False
+    try:
+        try:
+            _docker(args, 15)
+            created = True
+        except subprocess.TimeoutExpired as exc:
+            # The daemon might have received create even though the CLI timed out.
+            LOGGER.error('Docker create outcome unknown for %s', name)
+            raise WorkspaceFailure('workspace_cleanup_unconfirmed', 503,
+                                   'Docker container creation could not be confirmed') from exc
+        command = ['start', '--attach']
+        if payload is not None:
+            command.append('--interactive')
+        report = json.loads(_docker([*command, name], timeout, payload=payload))
+        if not isinstance(report, dict):
+            raise ValueError('Expected a JSON object from container')
+    except subprocess.TimeoutExpired as exc:
+        raise WorkspaceFailure('workspace_timeout', 504,
+                               'Workspace command timed out; container removed') from exc
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        LOGGER.warning('Workspace command failed for %s (%s)', name, type(exc).__name__)
+        raise WorkspaceFailure('workspace_runtime_error', 503,
+                               'Docker image or workspace command unavailable') from exc
+    finally:
+        if created:
+            try:
+                _docker(['rm', '--force', name], 10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                LOGGER.error('Docker cleanup unconfirmed for %s', name)
+                raise WorkspaceFailure('workspace_cleanup_unconfirmed', 503,
+                                       'Workspace container cleanup could not be confirmed') from exc
+    return {**report, 'container_removed': True}
+
+
 class DockerProbe:
     def __init__(self, timeout: float = 8):
         self.timeout = timeout
@@ -92,50 +137,14 @@ class DockerProbe:
     def run(self, base: Path, writable: Path, targets: tuple[str, ...], program: str,
             payload: str | None = None) -> dict:
         name = 'harness-workspace-' + uuid4().hex
-        args = ['create', '--name', name, '--pull=never', '--read-only', '--network=none',
-                '--user=65534:65534', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-                '--pids-limit=32', '--memory=96m', '--cpus=1', '--entrypoint=python',
-                '--mount', _bind(base, '/work', readonly=True)]
-        # The Docker client can otherwise forward proxy variables from its own config.
-        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'NO_PROXY'):
-            args.extend(['--env', key + '=', '--env', key.lower() + '='])
+        args = container_args(name, memory='96m', pids=32)
+        args.extend(['--entrypoint', 'python', '--mount', _bind(base, '/work', readonly=True)])
         if payload is not None:
             args.append('--interactive')
         for target in targets:
             args.extend(['--mount', _bind(writable / target, '/work/' + target)])
         args.extend([PROBE_IMAGE, '-I', '-B', '-c', program, *targets])
-        created = False
-        try:
-            try:
-                _docker(args, 15)
-                created = True
-            except subprocess.TimeoutExpired as exc:
-                # The daemon might have received create even though the CLI timed out.
-                LOGGER.error('Docker create outcome unknown for %s', name)
-                raise WorkspaceFailure('workspace_cleanup_unconfirmed', 503,
-                                       'Docker container creation could not be confirmed') from exc
-            command = ['start', '--attach']
-            if payload is not None:
-                command.append('--interactive')
-            report = json.loads(_docker([*command, name], self.timeout, payload=payload))
-            if not isinstance(report, dict):
-                raise ValueError('Expected a JSON object from container')
-        except subprocess.TimeoutExpired as exc:
-            raise WorkspaceFailure('workspace_timeout', 504,
-                                   'Workspace command timed out; container removed') from exc
-        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
-            LOGGER.warning('Workspace command failed for %s (%s)', name, type(exc).__name__)
-            raise WorkspaceFailure('workspace_runtime_error', 503,
-                                   'Docker image or workspace command unavailable') from exc
-        finally:
-            if created:
-                try:
-                    _docker(['rm', '--force', name], 10)
-                except (OSError, subprocess.SubprocessError) as exc:
-                    LOGGER.error('Docker cleanup unconfirmed for %s', name)
-                    raise WorkspaceFailure('workspace_cleanup_unconfirmed', 503,
-                                           'Workspace container cleanup could not be confirmed') from exc
-        return {**report, 'container_removed': True}
+        return run_container(args, name, self.timeout, payload=payload)
 
 
 def _source_path(path: str) -> bool:

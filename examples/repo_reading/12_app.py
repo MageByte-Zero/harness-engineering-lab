@@ -24,6 +24,7 @@ from repo_agent.persistence import LocalStore
 from repo_agent.skills import SkillLibrary
 from repo_agent.planning import PlanningRequest
 from repo_agent.access import load_local_access
+from repo_agent.verification import OrderVerifier
 from repo_agent.workspace import DockerProbe
 
 
@@ -46,6 +47,8 @@ def main():
                         help='Enable Docker workspace preparation for approved plans in Web mode')
     parser.add_argument('--edit-workspace', action='store_true',
                         help='Enable model-driven editing of approved Docker workspaces')
+    parser.add_argument('--verify-order-patch', action='store_true',
+                        help='Enable the fixed independent order response contract check')
     args = parser.parse_args()
     planning_request = None
     if args.plan_request:
@@ -58,6 +61,8 @@ def main():
         parser.error('--data-dir requires --conversation')
     if args.access_config and not (args.conversation and args.data_dir):
         parser.error('--access-config requires --conversation and --data-dir')
+    if args.verify_order_patch and not args.edit_workspace:
+        parser.error('--verify-order-patch requires --edit-workspace')
     if args.edit_workspace and not args.prepare_workspace:
         parser.error('--edit-workspace requires --prepare-workspace')
     if args.prepare_workspace and (not args.access_config or args.question):
@@ -162,7 +167,10 @@ def main():
                         raise SystemExit(1)
                 else:
                     probe = DockerProbe() if args.prepare_workspace else None
-                    uvicorn.run(create_app(manager, workspace_probe=probe, enable_edit=args.edit_workspace), host='127.0.0.1', port=args.port)
+                    verifier = OrderVerifier() if args.verify_order_patch else None
+                    contract = json.loads(Path('fixtures/planning/add-error-message.json').read_text()) if verifier else None
+                    uvicorn.run(create_app(manager, workspace_probe=probe, enable_edit=args.edit_workspace,
+                        order_verifier=verifier, order_contract=contract), host='127.0.0.1', port=args.port)
             finally:
                 child.terminate()
                 try:

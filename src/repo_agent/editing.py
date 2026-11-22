@@ -145,16 +145,18 @@ def unavailable(reason: str) -> dict:
     return {'kind': 'unavailable', 'stop_reason': reason}
 
 
-async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run_id: str, emit) -> dict:
+async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run_id: str, emit, *, initial: Path | None = None, feedback: list[dict] | None = None) -> dict:
     targets = tuple(binding['targets'])
     stage = directory.parent / ('.edit-' + run_id)
     stage.mkdir(mode=0o700)
     files = EditFiles(docker, directory / 'base', stage, targets)
     try:
+        seed = initial if initial is not None else files.base
+        initial_bytes = {path: (seed / path).read_bytes() for path in targets}
         for path in targets:
             target = stage / path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes((files.base / path).read_bytes())
+            target.write_bytes(initial_bytes[path])
             target.chmod(0o666)
 
         request = plan['request']
@@ -163,6 +165,8 @@ async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run
             agent = build_agent(model, None, instructions=EDIT_INSTRUCTIONS, extra_tools=files.tools())
             task = {'goal': request['goal'],
                     'constraints': request['constraints'], 'targets': targets, 'steps': plan['steps']}
+            if feedback is not None:
+                task['verification_failures'] = feedback
             async with asyncio.timeout(90):
                 await Runner.run(agent, json.dumps(task, ensure_ascii=False), max_turns=10,
                     hooks=EditHooks(emit), run_config=RunConfig(tracing_disabled=True))
@@ -171,8 +175,9 @@ async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run
                 await model.aclose()
 
         patch, changed = _patch(files.base, stage, targets)
+        edited = any((stage / path).read_bytes() != initial_bytes[path] for path in targets)
         result = ({'kind': 'patch_for_review', 'run_id': run_id, **binding,
-                   'changed_paths': changed, 'patch': patch} if changed else unavailable('no_changes'))
+                   'changed_paths': changed, 'patch': patch} if changed and edited else unavailable('no_changes'))
     except asyncio.CancelledError:
         result = unavailable('cancelled')
     except (TimeoutError, MaxTurnsExceeded, ModelBehaviorError) as exc:
