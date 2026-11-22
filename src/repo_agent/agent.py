@@ -23,10 +23,11 @@ RETRIEVAL_INSTRUCTIONS = """你是只读资料审查助手，用中文回答当�
 最终分别给出已确认结论、依据和未确认事项；没有依据时不要拼造答案。"""
 
 
-def build_agent(model, sources: dict[str, str], *, instructions: str = INSTRUCTIONS, extra_tools=(),
+def build_agent(model, sources: dict[str, str] | None, *, instructions: str = INSTRUCTIONS, extra_tools=(),
                 structured_output: bool = False, observation_prefix: str = "", planning: bool = False):
     from repo_agent.output import output_model, with_observation_ids
-    tools = [*repository_tools(sources), *extra_tools]
+    tools = list(repository_tools(sources)) if sources is not None else []
+    tools.extend(extra_tools)
     if planning:
         from repo_agent.planning import submission_tool
         tools.append(submission_tool())

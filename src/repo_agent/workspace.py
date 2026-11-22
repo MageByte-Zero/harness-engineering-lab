@@ -77,9 +77,9 @@ def _bind(source: Path, destination: str, *, readonly: bool = False) -> str:
     return buffer.getvalue()
 
 
-def _docker(args: list[str], timeout: float) -> str:
+def _docker(args: list[str], timeout: float, *, payload: str | None = None) -> str:
     return subprocess.run(['docker', *args], check=True, capture_output=True,
-                          text=True, timeout=timeout).stdout
+                          encoding='utf-8', input=payload, timeout=timeout).stdout
 
 
 class DockerProbe:
@@ -87,17 +87,23 @@ class DockerProbe:
         self.timeout = timeout
 
     def verify(self, directory: Path, targets: tuple[str, ...]) -> dict:
+        return self.run(directory / 'base', directory / 'write', targets, PROBE)
+
+    def run(self, base: Path, writable: Path, targets: tuple[str, ...], program: str,
+            payload: str | None = None) -> dict:
         name = 'harness-workspace-' + uuid4().hex
         args = ['create', '--name', name, '--pull=never', '--read-only', '--network=none',
                 '--user=65534:65534', '--cap-drop=ALL', '--security-opt=no-new-privileges',
                 '--pids-limit=32', '--memory=96m', '--cpus=1', '--entrypoint=python',
-                '--mount', _bind(directory / 'base', '/work', readonly=True)]
+                '--mount', _bind(base, '/work', readonly=True)]
         # The Docker client can otherwise forward proxy variables from its own config.
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'NO_PROXY'):
             args.extend(['--env', key + '=', '--env', key.lower() + '='])
+        if payload is not None:
+            args.append('--interactive')
         for target in targets:
-            args.extend(['--mount', _bind(directory / 'write' / target, '/work/' + target)])
-        args.extend([PROBE_IMAGE, '-I', '-B', '-c', PROBE, *targets])
+            args.extend(['--mount', _bind(writable / target, '/work/' + target)])
+        args.extend([PROBE_IMAGE, '-I', '-B', '-c', program, *targets])
         created = False
         try:
             try:
@@ -108,15 +114,19 @@ class DockerProbe:
                 LOGGER.error('Docker create outcome unknown for %s', name)
                 raise WorkspaceFailure('workspace_cleanup_unconfirmed', 503,
                                        'Docker container creation could not be confirmed') from exc
-            output = _docker(['start', '--attach', name], self.timeout)
-            report = json.loads(output)
+            command = ['start', '--attach']
+            if payload is not None:
+                command.append('--interactive')
+            report = json.loads(_docker([*command, name], self.timeout, payload=payload))
+            if not isinstance(report, dict):
+                raise ValueError('Expected a JSON object from container')
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceFailure('workspace_timeout', 504,
-                                   'Workspace probe timed out; container removed') from exc
+                                   'Workspace command timed out; container removed') from exc
         except (OSError, subprocess.CalledProcessError, ValueError) as exc:
-            LOGGER.warning('Workspace probe failed for %s (%s)', name, type(exc).__name__)
+            LOGGER.warning('Workspace command failed for %s (%s)', name, type(exc).__name__)
             raise WorkspaceFailure('workspace_runtime_error', 503,
-                                   'Docker image or workspace probe unavailable') from exc
+                                   'Docker image or workspace command unavailable') from exc
         finally:
             if created:
                 try:
@@ -158,6 +168,19 @@ class WorkspacePreparation:
     def get(self, principal: str, approval_id: str) -> dict | None:
         record = self._handoff(principal, approval_id)
         return self._read_workspace(self.root / approval_id, record)
+
+    def edit_inputs(self, principal: str, approval_id: str, revision: str) -> tuple[Path, dict, dict]:
+        record = self._handoff(principal, approval_id)
+        if revision != record['plan_revision']:
+            raise ApprovalConflict('Plan revision changed')
+        directory = self.root / approval_id
+        ready = self._read_workspace(directory, record)
+        if ready is None:
+            raise ApprovalConflict('Prepare the workspace first')
+        project = self.approvals.access.project(principal, record['project_id'])
+        self.approvals._require_snapshot(project, record['snapshot_id'])
+        binding = {**self._binding(record), 'workspace_id': ready['workspace_id']}
+        return directory, binding, record['plan']
 
     async def prepare(self, principal: str, approval_id: str, revision: str) -> dict:
         record = self._handoff(principal, approval_id)

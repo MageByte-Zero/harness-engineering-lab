@@ -1,12 +1,13 @@
 """Loopback-only teaching API; routes delegate execution to the existing use case."""
 import asyncio
 from contextlib import asynccontextmanager
+from functools import partial
 import json
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -16,6 +17,7 @@ from repo_agent.planning import PlanningRequest
 from repo_agent.access import AccessDenied
 from repo_agent.approval import PlanApprovals
 from repo_agent.persistence import ApprovalConflict
+from repo_agent.editing import edit_workspace
 from repo_agent.workspace import DockerProbe, WorkspaceFailure, WorkspacePreparation
 
 
@@ -40,7 +42,7 @@ class ReviewDecision(ApprovalRevision):
     decision: Literal['approve', 'reject']
 
 
-def create_app(manager, *, workspace_probe: DockerProbe | None = None):
+def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_edit: bool = False):
     access = getattr(manager.worker, 'access', None)
     approvals = PlanApprovals(manager, manager.store, access) if access is not None and manager.store is not None else None
     workspaces = WorkspacePreparation(approvals, workspace_probe) if approvals and workspace_probe else None
@@ -108,7 +110,7 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None):
     async def capabilities():
         return {'conversations':hasattr(manager.worker, 'create'), 'persistence':manager.store is not None,
                 'authentication': access is not None, 'approvals': approvals is not None,
-                'workspaces': workspaces is not None}
+                'workspaces': workspaces is not None, 'editing': enable_edit and workspaces is not None}
 
     @app.post('/session')
     async def login(request: Request):
@@ -225,6 +227,27 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None):
         if workspace is None:
             raise HTTPException(404, 'No ready workspace')
         return workspace
+
+    @app.post('/approvals/{approval_id}/workspace/edit', status_code=202)
+    async def start_edit(approval_id: str, body: ApprovalRevision, request: Request):
+        if not enable_edit:
+            raise HTTPException(404, 'Workspace editing is disabled')
+        service = workspace_service()
+        directory, binding, plan = service.edit_inputs(request.state.principal, approval_id, body.plan_revision)
+        ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
+        try:
+            job = partial(edit_workspace, directory, binding, plan, service.probe)
+            return manager.submit_edit(ownership, job).view()
+        except CapacityExceeded as exc:
+            raise HTTPException(429, 'Run capacity reached') from exc
+
+    @app.get('/runs/{run_id}/patch')
+    async def download_patch(run_id: str, request: Request):
+        run = find(run_id, request.state.principal)
+        if run.state != 'completed' or (run.result or {}).get('kind') != 'patch_for_review':
+            raise HTTPException(404, 'No completed patch')
+        return PlainTextResponse(run.result['patch'],
+            headers={'Content-Disposition': f'attachment; filename="{run.run_id}.patch"'})
 
     @app.post('/runs/{run_id}/cancel', status_code=202)
     async def cancel(run_id: str, request: Request):

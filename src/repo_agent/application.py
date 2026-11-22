@@ -100,13 +100,24 @@ class RunManager:
         if planning_request is not None:
             from repo_agent.planning import PlanningRequest
             planning_request = PlanningRequest.model_validate(planning_request).model_dump(mode='json')
-        if (self.closed or len(self.runs) >= self.retained_limit or
-                sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
-            raise CapacityExceeded()
+        self._check_capacity()
         conversation = self.worker.acquire(conversation_id,
             **({'principal': principal, 'project_id': project_id} if access is not None else {})) if conversation_id else None
         run = ActiveRun(str(uuid4()), question, conversation_id=conversation_id, planning_request=planning_request,
             ownership=dict(conversation.scope['ownership']) if access is not None and conversation is not None else None)
+        return self._enqueue(run, conversation)
+
+    def submit_edit(self, ownership, edit):
+        self._check_capacity()
+        run = ActiveRun(str(uuid4()), '编辑已批准的工作区', ownership=ownership)
+        return self._enqueue(run, edit=edit)
+
+    def _check_capacity(self):
+        if (self.closed or len(self.runs) >= self.retained_limit or
+                sum(r.state in ('queued', 'running', 'cancelling') for r in self.runs.values()) >= self.active_limit):
+            raise CapacityExceeded()
+
+    def _enqueue(self, run, conversation=None, *, edit=None):
         run.emit('queued')
         try:
             if self.store is not None:
@@ -116,10 +127,10 @@ class RunManager:
                 conversation.busy = False
             raise
         self.runs[run.run_id] = run
-        run.task = asyncio.create_task(self._execute(run, conversation))
+        run.task = asyncio.create_task(self._execute(run, conversation, edit=edit))
         return run
 
-    async def _execute(self, run, conversation=None):
+    async def _execute(self, run, conversation=None, *, edit=None):
         try:
             if run.cancel_requested:
                 run.state = 'cancelled'
@@ -128,17 +139,26 @@ class RunManager:
             run.emit('running')
             if self.store is not None:
                 self.store.save_run(run.view(), run.events)
-            run.execution = asyncio.create_task(self.worker(run.question,
-                self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
-                **({"conversation":conversation} if conversation is not None else {}),
-                **({'principal': run.ownership['owner_id']} if run.ownership else {}),
-                **({'planning_request': run.planning_request} if run.planning_request is not None else {})))
-            record = await run.execution
-            selection = record.get("conversation")
-            if selection:
-                run.context_selection = {k:v for k,v in selection.items() if k != "history"}
-            run.result = consume_answer(record)
-            run.state = ('cancelled' if run.cancel_requested or record['stop_reason'] == 'cancelled' else
+            if edit is None:
+                run.execution = asyncio.create_task(self.worker(run.question,
+                    self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
+                    **({"conversation": conversation} if conversation is not None else {}),
+                    **({'principal': run.ownership['owner_id']} if run.ownership else {}),
+                    **({'planning_request': run.planning_request} if run.planning_request is not None else {})))
+                record = await run.execution
+                selection = record.get("conversation")
+                if selection:
+                    run.context_selection = {k: v for k, v in selection.items() if k != "history"}
+                run.result = consume_answer(record)
+                stop_reason = record['stop_reason']
+            else:
+                run.execution = asyncio.create_task(edit(run.run_id, run.emit))
+                run.result = await run.execution
+                stop_reason = run.result.get('stop_reason')
+            if stop_reason == 'workspace_cleanup_unconfirmed':
+                run.state = 'failed'
+                return
+            run.state = ('cancelled' if run.cancel_requested or stop_reason == 'cancelled' else
                          'failed' if run.result['kind'] == 'unavailable' else 'completed')
             if run.state == 'cancelled':
                 run.result = {'kind': 'unavailable', 'stop_reason': 'cancelled'}

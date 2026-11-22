@@ -4,9 +4,9 @@
 
 ## 当前实现
 
-第 20 讲固定入口为 `lesson-20-workspace-20261122`。本版从 `lesson-19-approval-20261118` 演进，接入批准后的隔离工作区准备。应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
+第 21 讲固定入口为 `lesson-21-controlled-edit-20261122`。本版从 `lesson-20-workspace-20261122` 演进，在已就绪的隔离工作区接入受限编辑与补丁生成。应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
 
-这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。启用 `--prepare-workspace` 后，申请人能从已批准交接准备工作区。应用复查授权和来源摘要，在 Docker 中验证只读基线与逐文件可写挂载，保存准备记录。模型工具仍负责调查和计划；可写探针由应用固定，执行在任务副本中。
+这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。启用 `--prepare-workspace` 后，申请人能从已批准交接准备工作区。应用复查授权和来源摘要，在 Docker 中验证只读基线与逐文件可写挂载，保存准备记录。准备探针由应用固定，执行完恢复副本。启用 `--edit-workspace` 后，申请人可从已就绪工作区发起一笔编辑。SDK Runner 只获得读取和精确替换工具，应用在单次尝试的副本里执行，生成可审阅、可下载的补丁。
 
 | 源文件 | 当前职责 |
 | --- | --- |
@@ -18,23 +18,24 @@
 | `output.py`、`checks.py` | 结构化结果、来源关联和离线记录核对 |
 | `planning.py` | 需求与计划类型、提交工具、关联/覆盖检查和产物版本绑定 |
 | `approval.py` | 计划送审、指定审批人、决定校验与交接 |
-| `workspace.py` | 核对已批准交接、物化工作区、Docker 边界探针与清理 |
+| `workspace.py` | 核对已批准交接、物化工作区、Docker 文件挂载与清理 |
+| `editing.py` | 受限编辑工具、SDK 反馈、尝试清理与补丁生成 |
 | `application.py`、`web.py` | 用例与 Run 状态；FastAPI、SSE 和取消接口 |
 | `conversation.py`、`persistence.py` | 完整轮次选择/提交、SQLite 存储、重启与范围校验 |
 | `skills.py` | 受信本地任务方法包的按需加载和内容版本绑定 |
 
-包内有 19 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出。
+包内有 20 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出。
 
 ## 获取固定版本与最小运行
 
 需要 Git、Python 3.12、uv、ripgrep。第一次获取：
 
 ```bash
-git clone --branch lesson-20-workspace-20261122 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
+git clone --branch lesson-21-controlled-edit-20261122 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
 ```
 
-已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-20-workspace-20261122` 和 `git switch --detach lesson-20-workspace-20261122`。已发布标签保持原义，后续修订使用新标签。
+已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-21-controlled-edit-20261122` 和 `git switch --detach lesson-21-controlled-edit-20261122`。已发布标签保持原义，后续修订使用新标签。
 
 在根目录 `.env` 或进程环境配置 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。`.env.example` 是空值模板，程序不读取模板；已有 `.env` 不要覆盖，密钥不提交也不写进命令。模型需支持 Chat Completions 工具调用和本讲的结构化输出组合，标识 `auto` 不保证服务端模型身份稳定。
 
@@ -54,6 +55,8 @@ uv run --frozen python examples/repo_reading/12_app.py \
 可追加 `--business-transport mcp` 使用原 stdio 桥，或 `--skills-dir fixtures/skills` 启用任务方法。调查、修改计划共用 `12_app.py` 和一个 Runner。计划输入与程序检查见[第17讲运行说明](examples/repo_reading/17_README.md)；`plan_for_review` 只是可交给人审查，未获批准，也未修改或测试源码。
 
 第 20 讲的 Docker 镜像、准备入口、观察字段和清理验证见[第20讲运行说明](examples/repo_reading/20_README.md)。使用有权限访问本地 Docker 的可信开发环境。
+
+第 21 讲的编辑入口、补丁和取消实验见[运行说明](examples/repo_reading/21_README.md)。
 
 ## 验证与限制
 
@@ -79,6 +82,7 @@ MCP Python 2.3.0、Agents SDK 0.24.0 与其余依赖由 `uv.lock` 固定。MCP �
 - [第18讲](examples/repo_reading/18_README.md)：可信身份、项目取材、私有会话/结果、HTTP/MCP 授权和撤权重启。
 - [第19讲](examples/repo_reading/19_README.md)：持久送审、批准与拒绝、一次性交接和重启后的恢复验证。
 - [第20讲](examples/repo_reading/20_README.md)：从批准交接准备工作区，验证工具路径、进程范围和超时清理。
+- [第21讲](examples/repo_reading/21_README.md)：沿授权副本接入编辑工具，查看真实差异与取消结果。
 
 历史固定版本保持不变。`lesson-04-sdk-20261025` / `lesson-05-sdk-20261025` 是 SDK 起步版；`lesson-16-mcp-20261117` 是第17讲基线。迁移前 LangChain 实现可从 `69d2233` 历史查看，不在当前源码中并行维护。
 
