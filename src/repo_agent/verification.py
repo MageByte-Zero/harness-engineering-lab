@@ -61,21 +61,23 @@ class OrderVerifier:
     def __init__(self, image: str = VERIFY_IMAGE):
         self.image = image
 
-    def check(self, source: Path) -> dict:
+    def resolve_image(self) -> str:
         try:
-            image_id = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', self.image],
+            return subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', self.image],
                                                 text=True, stderr=subprocess.DEVNULL, timeout=6).strip()
         except (OSError, subprocess.SubprocessError) as exc:
             raise WorkspaceFailure('verification_image_unavailable', 503, 'Verifier image unavailable') from exc
-        name = 'harness-verify-' + uuid4().hex
-        args = container_args(name, memory='384m', pids=96)
+    def check(self, source: Path, *, image_id: str | None = None, reservation: tuple[str, str] | None = None) -> dict:
+        image_id = image_id if image_id is not None else self.resolve_image()
+        name, owner = reservation or ('harness-verify-' + uuid4().hex, None)
+        args = container_args(name, memory='384m', pids=96, run_id=owner)
         args.extend(['--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=96m',
                      '--mount', _bind(source, '/candidate', readonly=True), image_id])
         return {**run_container(args, name, 35), 'verifier_image_id': image_id}
 
 
-async def _run_check(verifier: OrderVerifier, source: Path) -> dict:
-    task = asyncio.create_task(asyncio.to_thread(verifier.check, source))
+async def _run_check(verifier: OrderVerifier, source: Path, **options) -> dict:
+    task = asyncio.create_task(asyncio.to_thread(verifier.check, source, **options))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -101,8 +103,12 @@ def _checked_rows(report: dict) -> list[dict]:
 
 
 async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verifier: OrderVerifier,
-                       original: dict, repair: bool, run_id: str, emit) -> dict:
-    stage = Path(mkdtemp(prefix='.verify-' + run_id + '-', dir=directory.parent))
+                       original: dict, repair: bool, run_id: str, emit, *, journal=None) -> dict:
+    if journal is None:
+        stage = Path(mkdtemp(prefix='.verify-' + run_id + '-', dir=directory.parent))
+    else:
+        stage = directory.parent / ('.verify-' + run_id)
+        stage.mkdir(mode=0o700)
     attempts = []
     candidate = original
     preserve = False
@@ -119,7 +125,15 @@ async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verif
                 break
             emit('verification_started', {'attempt': index + 1})
             try:
-                report = await _run_check(verifier, check_source)
+                options = {}
+                if journal is not None:
+                    image_id = await asyncio.to_thread(verifier.resolve_image)
+                    options = {'image_id': image_id, 'reservation': await journal.reserve('harness-verify-')}
+                    journal.save(check_input={'patch_sha256': receipt['patch_sha256'],
+                                              'image_id': image_id, 'attempt': index + 1})
+                report = await _run_check(verifier, check_source, **options)
+                if options and report['verifier_image_id'] != options['image_id']:
+                    raise ValueError('Verifier image differs from saved attempt')
                 image_id = report['verifier_image_id']
                 if index and image_id != attempts[0]['verifier_image_id']:
                     raise ValueError('Verifier image changed between attempts')
@@ -136,11 +150,16 @@ async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verif
             receipt['outcome'] = 'requirements_failed' if failures else 'verified'
             emit('verification_finished', {'attempt': index + 1, 'status': receipt['outcome']})
             if not failures or index == 1 or not repair:
+                if journal is not None:
+                    journal.ready(_result(original, binding, attempts))
                 break
+            if journal is not None:
+                journal.save(repair_started=True, checks=[{key: value for key, value in receipt.items()
+                                                          if key != 'patch'}])
             emit('repair_started', {'attempt': index + 1, 'failed_checks': [row['id'] for row in failures]})
             try:
                 candidate = await edit_workspace(directory, binding, plan, docker, run_id, emit,
-                                                 initial=check_source, feedback=failures)
+                                                 initial=check_source, feedback=failures, journal=journal)
             except Exception as exc:
                 receipt['repair_stop_reason'] = type(exc).__name__
                 break
@@ -155,6 +174,10 @@ async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verif
     finally:
         if not preserve:
             shutil.rmtree(stage)
+    return _result(original, binding, attempts)
+
+
+def _result(original: dict, binding: dict, attempts: list[dict]) -> dict:
     final = attempts[-1]
     result = {'source_run_id': original['run_id'], **binding, 'attempts': attempts}
     if final['outcome'] == 'verified':

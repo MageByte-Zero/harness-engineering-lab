@@ -18,7 +18,7 @@
 const terminal=new Set(['completed','failed','cancelled','interrupted']);
 const labels={queued:'等待开始',running:'处理中',cancelling:'正在请求停止',completed:'执行结束',failed:'结果不可用',cancelled:'已停止',interrupted:'进程中断，请重新发起'};
 const kinds={answer_for_review:'回答待审阅',needs_information:'信息不足',unavailable:'结果不可用',plan_for_review:'修改计划 · 待人工审查',plan_needs_information:'计划需要补充条件',patch_for_review:'补丁待检查',verification_for_review:'独立检查通过 · 待审阅'};
-const eventNames={queued:'运行已创建',running:'运行开始',model_started:'等待模型响应',tool_requested:'模型请求工具',tool_started:'工具开始执行',tool_finished:'工具已返回',verification_started:'独立检查开始',verification_finished:'独立检查结束',repair_started:'开始一次修正',cancel_requested:'取消已请求',completed:'执行结束',failed:'结果不可用',cancelled:'执行已停止',interrupted:'上次进程已中断，未自动重放'};
+const eventNames={queued:'运行已创建',running:'运行开始',model_started:'等待模型响应',tool_requested:'模型请求工具',tool_started:'工具开始执行',tool_finished:'工具已返回',verification_started:'独立检查开始',verification_finished:'独立检查结束',repair_started:'开始一次修正',cancel_requested:'取消已请求',completed:'执行结束',failed:'结果不可用',cancelled:'执行已停止',interrupted:'上次进程已中断，未自动重放',recovery_recorded:'中断核对结果已保存'};
 const connections=new Map();let conversationEnabled=false;let conversationVersion=0;let authenticatedMode=false;let approvalEnabled=false;let approvalVersion=0;let workspaceEnabled=false;let editEnabled=false;let verificationEnabled=false;
 async function start(){const c=await api('/capabilities');conversationEnabled=c.conversations;authenticatedMode=c.authentication;approvalEnabled=c.approvals;workspaceEnabled=c.workspaces;editEnabled=c.editing;verificationEnabled=c.verification;document.querySelector('#auth-panel').hidden=!authenticatedMode;if(c.persistence)document.querySelector('#storage-hint').textContent='会话与结果保存在本地数据目录，重启后可重新查看。';if(authenticatedMode){try{await signedIn()}catch{setLoggedIn(false)}}else{document.querySelector('#conversation-panel').hidden=!conversationEnabled;if(conversationEnabled)await loadConversations()}}
 function clearWorkspace(){for(const area of document.querySelectorAll('textarea'))area.value='';document.querySelector('#error').textContent='';for(const es of connections.values())es.close();connections.clear();conversationVersion++;approvalVersion++;document.querySelector('#approvals').replaceChildren();document.querySelector('#runs').replaceChildren();document.querySelector('#saved-runs').replaceChildren();document.querySelector('#conversation-id').value='';document.querySelector('#run-id').value='';document.querySelector('#saved-conversations').replaceChildren()}
@@ -61,6 +61,31 @@ async function watch(id){
  let es;async function refresh(){let run=await api('/runs/'+encodeURIComponent(id));status.textContent=labels[run.state]||run.state;cancel.disabled=terminal.has(run.state)||run.cancel_requested;
  if(run.context_selection&&run.context_selection.omitted_turns)status.textContent+=' · 已省略 '+run.context_selection.omitted_turns+' 轮历史';
  if(run.result){result.replaceChildren(node('h3',kinds[run.result.kind]||run.result.kind));if(run.result.artifact)renderPlan(result,run.result);if(approvalEnabled&&run.result.kind==='plan_for_review')addReviewForm(result,run);if(run.result.conclusion)result.append(node('p',run.result.conclusion));if(run.result.facts?.length){let facts=node('ul','');for(let f of run.result.facts)facts.append(node('li',f.statement+' ['+f.source_ids.join(', ')+']'));result.append(facts)}if(run.result.gaps?.length)result.append(node('p','缺口：'+run.result.gaps.join('；')));if(['patch_for_review','verification_for_review'].includes(run.result.kind)){const download=node('a','下载补丁');download.href='/runs/'+encodeURIComponent(id)+'/patch';result.append(download,node('pre',run.result.patch))}if(verificationEnabled&&run.result.kind==='patch_for_review')addVerificationButtons(result,id);if(run.result.kind!=='unavailable'&&run.result.kind!=='patch_for_review'&&run.result.kind!=='verification_for_review'&&!run.result.artifact)result.append(node('p','来源关联经过程序检查，回答含义仍需审阅。'));let details=node('details','');details.append(node('summary','查看来源、检查与完整结果'),node('pre',JSON.stringify(run.result,null,2)));result.append(details)}
+ if(run.recovery){
+  const recovery=node('div','');result.append(recovery);
+  if(run.recovery.status==='pending'){
+   const resume=node('button','核对中断动作');recovery.append(resume);
+   resume.onclick=async()=>{resume.disabled=true;try{
+    await api('/runs/'+encodeURIComponent(id)+'/recovery',{method:'POST'});await refresh()
+   }catch(e){showError(e);resume.disabled=false}};
+  }else if(run.recovery.status==='cancelled'){
+   recovery.append(node('p','已核对旧操作，保留取消决定。'));
+  }else if(run.recovery.status==='receipt_restored'){
+   recovery.append(node('p','已取回上次保存的回执。'));
+  }else if(run.recovery.status==='edit_needs_review'){
+   const paths=run.recovery.changed_paths||[];
+   recovery.append(node('p',paths.length?'暂存副本已变更：'+paths.join('、')+'。请核对后再发起编辑。':'没有可交付的编辑回执。请核对原副本后再发起编辑。'));
+  }else if(run.recovery.status==='verification_retry'){
+   recovery.append(node('p','本次检查没有可交付的完整回执。可以对原候选单独复验，试修不会重放。'));
+   const retry=node('button','复验原补丁');recovery.append(retry);
+   retry.onclick=async()=>{retry.disabled=true;try{
+    const original=run.recovery.source_run_id;
+    const next=await api('/runs/'+encodeURIComponent(original)+'/verification',{method:'POST',
+       headers:{'Content-Type':'application/json'},body:JSON.stringify({repair:false})});
+    document.querySelector('#run-id').value=next.run_id;await watch(next.run_id)
+   }catch(e){showError(e)}finally{retry.disabled=false}};
+  }
+ }
  if(terminal.has(run.state)&&es){es.close();connections.delete(id)}return run}
  cancel.onclick=async()=>{try{await api('/runs/'+id+'/cancel',{method:'POST'});await refresh()}catch(e){showError(e)}};
  try{const run=await refresh();if(terminal.has(run.state))return;es=new EventSource('/runs/'+encodeURIComponent(id)+'/events');connections.set(id,es);es.onmessage=async e=>{let v=JSON.parse(e.data);log.append(node('li',(eventNames[v.kind]||v.kind)+(v.data.tool?' · '+v.data.tool:'')+(v.data.status?' · '+v.data.status:'')));if(terminal.has(v.kind)){es.close();connections.delete(id);try{await refresh();if(conversationEnabled)await loadConversations(document.querySelector('#conversation-id').value)}catch(e){showError(e)}}};es.onerror=()=>{status.textContent='进度连接中断，可使用运行编号重新连接';es.close();connections.delete(id);refresh().catch(showError)}

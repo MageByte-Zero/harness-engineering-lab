@@ -62,9 +62,11 @@ NewText = Annotated[str, Field(max_length=8000)]
 
 
 class EditFiles:
-    def __init__(self, docker, base: Path, writable: Path, targets: tuple[str, ...]):
+    def __init__(self, docker, base: Path, writable: Path, targets: tuple[str, ...], journal=None):
         self.docker, self.base, self.writable, self.targets = docker, base, writable, targets
         self.pending: asyncio.Task[dict] | None = None
+        self.file_lock = asyncio.Lock()
+        self.journal = journal
 
     def tools(self):
         @function_tool(failure_error_function=None)
@@ -72,8 +74,9 @@ class EditFiles:
             """Read an approved file in this attempt. Use its exact text for replacement."""
             if path not in self.targets:
                 return {'status': 'target_denied', 'path': path}
-            text = (self.writable / path).read_bytes().decode('utf-8')
-            return {'status': 'ok', 'path': path, 'content': text, 'sha256': source_hash(text)}
+            async with self.file_lock:
+                text = (self.writable / path).read_bytes().decode('utf-8')
+                return {'status': 'ok', 'path': path, 'content': text, 'sha256': source_hash(text)}
 
         @function_tool(failure_error_function=None)
         async def replace_edit_text(path: EditPath, old_text: OldText, new_text: NewText):
@@ -81,9 +84,13 @@ class EditFiles:
             if path not in self.targets:
                 return {'status': 'target_denied', 'path': path}
             payload = json.dumps({'path': path, 'old_text': old_text, 'new_text': new_text})
-            self.pending = asyncio.create_task(asyncio.to_thread(
-                self.docker.run, self.base, self.writable, self.targets, REPLACE_PROGRAM, payload))
-            return {**await asyncio.shield(self.pending), 'path': path}
+            async with self.file_lock:
+                options = {}
+                if self.journal is not None:
+                    options['reservation'] = await self.journal.reserve('harness-workspace-')
+                self.pending = asyncio.create_task(asyncio.to_thread(
+                    self.docker.run, self.base, self.writable, self.targets, REPLACE_PROGRAM, payload, **options))
+                return {**await asyncio.shield(self.pending), 'path': path}
 
         return [read_edit_file, replace_edit_text]
 
@@ -145,11 +152,11 @@ def unavailable(reason: str) -> dict:
     return {'kind': 'unavailable', 'stop_reason': reason}
 
 
-async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run_id: str, emit, *, initial: Path | None = None, feedback: list[dict] | None = None) -> dict:
+async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run_id: str, emit, *, initial: Path | None = None, feedback: list[dict] | None = None, journal=None) -> dict:
     targets = tuple(binding['targets'])
     stage = directory.parent / ('.edit-' + run_id)
     stage.mkdir(mode=0o700)
-    files = EditFiles(docker, directory / 'base', stage, targets)
+    files = EditFiles(docker, directory / 'base', stage, targets, journal)
     try:
         seed = initial if initial is not None else files.base
         initial_bytes = {path: (seed / path).read_bytes() for path in targets}
@@ -178,6 +185,8 @@ async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run
         edited = any((stage / path).read_bytes() != initial_bytes[path] for path in targets)
         result = ({'kind': 'patch_for_review', 'run_id': run_id, **binding,
                    'changed_paths': changed, 'patch': patch} if changed and edited else unavailable('no_changes'))
+        if journal is not None and initial is None and result['kind'] == 'patch_for_review':
+            journal.ready(result)
     except asyncio.CancelledError:
         result = unavailable('cancelled')
     except (TimeoutError, MaxTurnsExceeded, ModelBehaviorError) as exc:

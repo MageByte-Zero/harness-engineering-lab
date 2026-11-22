@@ -82,10 +82,15 @@ def _docker(args: list[str], timeout: float, *, payload: str | None = None) -> s
                           encoding='utf-8', input=payload, timeout=timeout).stdout
 
 
-def container_args(name: str, *, memory: str, pids: int) -> list[str]:
+OPERATION_LABEL = 'io.magebyte.harness.run'
+
+
+def container_args(name: str, *, memory: str, pids: int, run_id: str | None = None) -> list[str]:
     args = ['create', '--name', name, '--pull=never', '--read-only', '--network=none',
             '--user=65534:65534', '--cap-drop=ALL', '--security-opt=no-new-privileges',
             '--pids-limit', str(pids), '--memory', memory, '--cpus=1']
+    if run_id is not None:
+        args.extend(['--label', OPERATION_LABEL + '=' + run_id])
     # The Docker client can otherwise forward proxy variables from its own config.
     for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY', 'NO_PROXY'):
         args.extend(['--env', key + '=', '--env', key.lower() + '='])
@@ -135,9 +140,9 @@ class DockerProbe:
         return self.run(directory / 'base', directory / 'write', targets, PROBE)
 
     def run(self, base: Path, writable: Path, targets: tuple[str, ...], program: str,
-            payload: str | None = None) -> dict:
-        name = 'harness-workspace-' + uuid4().hex
-        args = container_args(name, memory='96m', pids=32)
+            payload: str | None = None, *, reservation: tuple[str, str] | None = None) -> dict:
+        name, owner = reservation or ('harness-workspace-' + uuid4().hex, None)
+        args = container_args(name, memory='96m', pids=32, run_id=owner)
         args.extend(['--entrypoint', 'python', '--mount', _bind(base, '/work', readonly=True)])
         if payload is not None:
             args.append('--interactive')

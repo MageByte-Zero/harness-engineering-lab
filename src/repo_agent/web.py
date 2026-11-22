@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from functools import partial
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Literal
@@ -18,6 +19,7 @@ from repo_agent.access import AccessDenied
 from repo_agent.approval import PlanApprovals
 from repo_agent.persistence import ApprovalConflict
 from repo_agent.editing import edit_workspace
+from repo_agent.recovery import baseline_digest, reconcile
 from repo_agent.verification import OrderVerifier, authorized_contract, verify_patch
 from repo_agent.workspace import DockerProbe, WorkspaceFailure, WorkspacePreparation
 
@@ -236,24 +238,15 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_ed
             raise HTTPException(404, 'No ready workspace')
         return workspace
 
-    @app.post('/approvals/{approval_id}/workspace/edit', status_code=202)
-    async def start_edit(approval_id: str, body: ApprovalRevision, request: Request):
-        if not enable_edit:
-            raise HTTPException(404, 'Workspace editing is disabled')
-        service = workspace_service()
-        directory, binding, plan = service.edit_inputs(request.state.principal, approval_id, body.plan_revision)
-        ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
-        try:
-            job = partial(edit_workspace, directory, binding, plan, service.probe)
-            return manager.submit_job('编辑已批准的工作区', ownership, job).view()
-        except CapacityExceeded as exc:
-            raise HTTPException(429, 'Run capacity reached') from exc
+    def check_interrupted_workspace(binding):
+        if any(run.state == 'interrupted' and run.operation and run.recovery is None
+               and run.operation['binding']['workspace_id'] == binding['workspace_id']
+               for run in manager.runs.values()):
+            raise ApprovalConflict('Reconcile the interrupted workspace run first')
 
-    @app.post('/runs/{run_id}/verification', status_code=202)
-    async def verify_candidate(run_id: str, body: VerificationSubmission, request: Request):
-        if order_verifier is None or order_contract is None:
+    def verification_inputs(run_id, principal):
+        if order_contract is None:
             raise HTTPException(404, 'Independent verification is disabled')
-        principal = request.state.principal
         run = find(run_id, principal)
         candidate = run.result or {}
         if run.state != 'completed' or candidate.get('kind') != 'patch_for_review':
@@ -264,13 +257,67 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_ed
         if any(candidate.get(key) != value for key, value in binding.items()) or candidate.get('run_id') != run_id:
             raise ApprovalConflict('Candidate binding changed')
         authorized_contract(binding, plan, order_contract)
+        return candidate, directory, binding, plan
+
+    @app.post('/approvals/{approval_id}/workspace/edit', status_code=202)
+    async def start_edit(approval_id: str, body: ApprovalRevision, request: Request):
+        if not enable_edit:
+            raise HTTPException(404, 'Workspace editing is disabled')
+        service = workspace_service()
+        directory, binding, plan = service.edit_inputs(request.state.principal, approval_id, body.plan_revision)
+        check_interrupted_workspace(binding)
         ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
+        operation = {'kind': 'edit', 'binding': binding, 'baseline_digest': baseline_digest(directory / 'base')}
         try:
-            job = partial(verify_patch, directory, binding, plan, service.probe, order_verifier,
-                          candidate, body.repair)
-            return manager.submit_job('独立检查订单响应', ownership, job).view()
+            job = partial(edit_workspace, directory, binding, plan, service.probe)
+            return manager.submit_job('编辑已批准的工作区', ownership, job, operation=operation).view()
         except CapacityExceeded as exc:
             raise HTTPException(429, 'Run capacity reached') from exc
+
+    @app.post('/runs/{run_id}/verification', status_code=202)
+    async def verify_candidate(run_id: str, body: VerificationSubmission, request: Request):
+        if order_verifier is None:
+            raise HTTPException(404, 'Independent verification is disabled')
+        candidate, directory, binding, plan = verification_inputs(run_id, request.state.principal)
+        check_interrupted_workspace(binding)
+        if body.repair and any(saved.recovery and saved.recovery['status'] == 'verification_retry'
+                               and saved.recovery['source_run_id'] == run_id for saved in manager.runs.values()):
+            raise ApprovalConflict('Use verification without repair for the interrupted candidate')
+        ownership = {key: binding[key] for key in ('owner_id', 'project_id')}
+        operation = {'kind': 'verification', 'binding': binding, 'source_run_id': run_id,
+                     'candidate_digest': sha256(candidate['patch'].encode()).hexdigest(),
+                     'baseline_digest': baseline_digest(directory / 'base'), 'repair_requested': body.repair}
+        try:
+            job = partial(verify_patch, directory, binding, plan, workspace_service().probe, order_verifier,
+                          candidate, body.repair)
+            return manager.submit_job('独立检查订单响应', ownership, job, operation=operation).view()
+        except CapacityExceeded as exc:
+            raise HTTPException(429, 'Run capacity reached') from exc
+
+    @app.post('/runs/{run_id}/recovery')
+    async def recover_run(run_id: str, request: Request):
+        principal = request.state.principal
+        async with manager.recovery_lock:
+            run = find(run_id, principal)
+            if run.recovery is not None:
+                return run.view()
+            operation = run.operation
+            if run.state != 'interrupted' or operation is None:
+                raise ApprovalConflict('No interrupted workspace operation to reconcile')
+            saved = operation['binding']
+            if operation['kind'] == 'verification':
+                if order_verifier is None:
+                    raise HTTPException(404, 'Independent verification is disabled')
+                candidate, directory, binding, _ = verification_inputs(operation['source_run_id'], principal)
+                if sha256(candidate['patch'].encode()).hexdigest() != operation['candidate_digest']:
+                    raise ApprovalConflict('Candidate content changed')
+            else:
+                directory, binding, _ = workspace_service().edit_inputs(principal, saved['approval_id'],
+                                                                      saved['plan_revision'])
+            if binding != saved:
+                raise ApprovalConflict('Interrupted operation binding changed')
+            decision, receipt = await reconcile(run, directory)
+            return manager.publish_recovery(run, decision, receipt).view()
 
     @app.get('/runs/{run_id}/patch')
     async def download_patch(run_id: str, request: Request):

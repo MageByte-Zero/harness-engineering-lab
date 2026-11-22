@@ -1,6 +1,6 @@
 """One investigation use case and bounded, process-local run ownership."""
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -46,16 +46,24 @@ class ActiveRun:
     planning_request: dict | None = None
     ownership: dict | None = None
 
+    operation: dict | None = None
+    recovery: dict | None = None
+
     def emit(self, kind, data=None):
         self.events.append({'seq': len(self.events) + 1, 'run_id': self.run_id,
             'at': datetime.now(timezone.utc).isoformat(), 'kind': kind, 'data': data or {}})
 
-    def view(self):
-        return {'run_id': self.run_id, 'question': self.question, 'state': self.state,
+    def view(self, *, durable=False):
+        result = {'run_id': self.run_id, 'question': self.question, 'state': self.state,
                 'cancel_requested': self.cancel_requested, 'result': self.result,
                 'conversation_id': self.conversation_id, 'context_selection': self.context_selection,
                 **({'planning_request': self.planning_request} if self.planning_request is not None else {}),
                 **({'ownership': self.ownership} if self.ownership is not None else {})}
+        if durable and self.operation is not None:
+            result.update(operation=self.operation, recovery=self.recovery)
+        elif self.recovery is not None or (self.operation is not None and self.state == 'interrupted'):
+            result['recovery'] = self.recovery or {'status': 'pending'}
+        return result
 
 
 class RunManager:
@@ -65,6 +73,7 @@ class RunManager:
         self.active_limit, self.retained_limit = active_limit, retained_limit
         self.runs: dict[str, ActiveRun] = {}
         self.closed = False
+        self.recovery_lock = asyncio.Lock()
         self.store = getattr(worker, 'store', None)
         if self.store is not None:
             for saved in self.store.load_runs():
@@ -107,9 +116,9 @@ class RunManager:
             ownership=dict(conversation.scope['ownership']) if access is not None and conversation is not None else None)
         return self._enqueue(run, conversation)
 
-    def submit_job(self, question, ownership, job):
+    def submit_job(self, question, ownership, job, *, operation=None):
         self._check_capacity()
-        run = ActiveRun(str(uuid4()), question, ownership=ownership)
+        run = ActiveRun(str(uuid4()), question, ownership=ownership, operation=operation)
         return self._enqueue(run, job=job)
 
     def _check_capacity(self):
@@ -121,7 +130,7 @@ class RunManager:
         run.emit('queued')
         try:
             if self.store is not None:
-                self.store.save_run(run.view(), run.events)
+                self.store.save_run(run.view(durable=True), run.events)
         except Exception:
             if conversation is not None:
                 conversation.busy = False
@@ -138,7 +147,7 @@ class RunManager:
             run.state = 'running'
             run.emit('running')
             if self.store is not None:
-                self.store.save_run(run.view(), run.events)
+                self.store.save_run(run.view(durable=True), run.events)
             if job is None:
                 run.execution = asyncio.create_task(self.worker(run.question,
                     self.directory / f'{run.run_id}.json', run_id=run.run_id, emit=run.emit,
@@ -152,7 +161,11 @@ class RunManager:
                 run.result = consume_answer(record)
                 stop_reason = record['stop_reason']
             else:
-                run.execution = asyncio.create_task(job(run.run_id, run.emit))
+                options = {}
+                if run.operation is not None:
+                    from repo_agent.recovery import OperationJournal
+                    options['journal'] = OperationJournal(run, self.store)
+                run.execution = asyncio.create_task(job(run.run_id, run.emit, **options))
                 run.result = await run.execution
                 stop_reason = run.result.get('stop_reason')
             if stop_reason == 'workspace_cleanup_unconfirmed':
@@ -175,7 +188,7 @@ class RunManager:
             turn = getattr(self.worker, 'pending_turns', {}).pop(run.run_id, None)
             try:
                 if self.store is not None:
-                    self.store.save_run(run.view(), run.events,
+                    self.store.save_run(run.view(durable=True), run.events,
                         turn=turn if run.state == 'completed' else None)
                     if turn is not None and run.state == 'completed' and conversation is not None:
                         conversation.turns.append(turn)
@@ -189,6 +202,21 @@ class RunManager:
                 if conversation is not None:
                     conversation.busy = False
 
+    def publish_recovery(self, run, decision, result=None):
+        if self.store is None:
+            raise RuntimeError('Recovery requires persistent runs')
+        recovered = replace(run, events=list(run.events), recovery=decision)
+        if result is not None:
+            recovered.result = result
+            recovered.state = 'failed' if result['kind'] == 'unavailable' else 'completed'
+        elif decision['status'] == 'cancelled':
+            recovered.state = 'cancelled'
+            recovered.result = {'kind': 'unavailable', 'stop_reason': 'cancelled'}
+        recovered.emit('recovery_recorded', {'status': decision['status']})
+        self.store.save_run(recovered.view(durable=True), recovered.events)
+        self.runs[run.run_id] = recovered
+        return recovered
+
     def cancel(self, run, *, principal=None):
         self.get(run.run_id, principal=principal)
         return self._cancel(run)
@@ -198,6 +226,8 @@ class RunManager:
             run.cancel_requested = True
             run.state = 'cancelling'
             run.emit('cancel_requested')
+            if run.operation is not None and self.store is not None:
+                self.store.save_run(run.view(durable=True), run.events)
             if run.execution is not None:
                 run.execution.cancel()
         return run
