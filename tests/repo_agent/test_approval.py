@@ -1,8 +1,10 @@
 """Verify persisted approvals through the same authenticated HTTP endpoints."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 
 from fastapi.testclient import TestClient
 import pytest
@@ -14,6 +16,7 @@ from repo_agent.conversation import ConversationWorker
 from repo_agent.persistence import LocalStore
 from repo_agent.tools import load_source_bundle, snapshot_hash
 from repo_agent.web import create_app
+from repo_agent import workspace
 from tests.repo_agent.test_planning import plan, requirement
 
 
@@ -32,9 +35,9 @@ def manager(store, access):
     return RunManager(store.records, worker)
 
 
-def save_plan(store, root, run_id='plan-run', *, kind='plan_for_review'):
+def save_plan(store, root, run_id='plan-run', *, kind='plan_for_review', target='src/ApiExceptionHandler.java'):
     ownership = {'owner_id': 'alice', 'project_id': 'alpha'}
-    result = {**plan(), 'kind': kind, 'request': requirement(),
+    result = {**plan(target=target), 'kind': kind, 'request': requirement(),
               'artifact': {'id': run_id + '/plan', 'revision': REVISION,
                            'snapshot_id': snapshot_hash(load_source_bundle({'code': root}))}}
     store.save_run({'run_id': run_id, 'question': 'Alice private question', 'result': result,
@@ -53,6 +56,108 @@ def send(client, reviewer='bob', *, run_id='plan-run', actor='alice'):
 def decide(client, key, actor='bob', decision='approve', revision=REVISION, **extra):
     return client.post(f'/approvals/{key}/decision', headers=token(actor),
                        json={'plan_revision': revision, 'decision': decision, **extra})
+
+
+def _workspace_request(client, approval_id, actor='alice', **extra):
+    return client.post(f'/approvals/{approval_id}/workspace', headers=token(actor),
+                       json={'plan_revision': REVISION, **extra})
+
+
+def _workspace_fixture(root):
+    (root / 'src').mkdir(parents=True)
+    (root / 'src/ApiExceptionHandler.java').write_bytes(b'before\r\n')
+    (root / 'src/OrderController.java').write_bytes(b'neighbor\n')
+    (root / 'test_reference.py').write_text('protected reference')
+    (root / '.env').write_text('MODEL_API_KEY=synthetic')
+
+
+def test_workspace_checks_handoff_scope_and_source_before_creating_files(tmp_path, monkeypatch):
+    root = tmp_path / 'source'
+    _workspace_fixture(root)
+    store_dir = tmp_path / 'data'
+    calls = []
+
+    def verify(self, directory, targets):
+        calls.append(targets)
+        assert set(targets) == {'code/src/ApiExceptionHandler.java'}
+        assert not (directory / 'base/code/test_reference.py').exists()
+        assert not (directory / 'base/code/.env').exists()
+        assert (directory / 'write' / targets[0]).read_bytes() == b'before\r\n'
+        return {'container_removed': True}
+
+    monkeypatch.setattr(workspace.DockerProbe, 'verify', verify)
+    with LocalStore(store_dir) as store:
+        save_plan(store, root, target='code/src/ApiExceptionHandler.java')
+        save_plan(store, root, 'outside-policy', target='code/test_reference.py')
+        with TestClient(create_app(manager(store, policy(root)), workspace_probe=workspace.DockerProbe())) as client:
+            key = send(client).json()['approval_id']
+            assert _workspace_request(client, key).status_code == 409
+            assert decide(client, key).status_code == 200
+            assert _workspace_request(client, key, 'bob').status_code == 403
+            assert _workspace_request(client, key, target='code/src/OrderController.java').status_code == 422
+            assert _workspace_request(client, key, plan_revision='0' * 64).status_code == 409
+            other = send(client, run_id='outside-policy').json()['approval_id']
+            assert decide(client, other).status_code == 200
+            denied = _workspace_request(client, other)
+            assert (denied.status_code, denied.json()['code']) == (403, 'workspace_target_denied')
+            source = root / 'src/ApiExceptionHandler.java'
+            source.write_bytes(b'changed since approval')
+            conflict = _workspace_request(client, key)
+            assert (conflict.status_code, conflict.json()['code']) == (409, 'workspace_source_changed')
+            assert not calls and not (store_dir / 'workspaces').exists()
+            source.write_bytes(b'before\r\n')
+            leftover = store_dir / 'workspaces' / ('.prepare-' + key + '-old')
+            leftover.mkdir(parents=True)
+            blocked = _workspace_request(client, key)
+            assert (blocked.status_code, blocked.json()['code']) == (503, 'workspace_cleanup_unconfirmed')
+            assert not calls
+            leftover.rmdir()
+            ready = _workspace_request(client, key)
+            assert ready.status_code == 200 and ready.json()['state'] == 'ready'
+            assert _workspace_request(client, key).json() == ready.json()
+            assert len(calls) == 1
+    with LocalStore(store_dir) as store:
+        with TestClient(create_app(manager(store, policy(root)), workspace_probe=workspace.DockerProbe())) as client:
+            assert client.get(f'/approvals/{key}/workspace', headers=token('alice')).json() == ready.json()
+            assert client.get(f'/approvals/{key}/workspace', headers=token('bob')).status_code == 403
+
+
+@pytest.mark.skipif(os.getenv('HARNESS_DOCKER_WORKSPACE_TEST') != '1', reason='Requires local Docker and pinned image')
+def test_workspace_real_docker_denial_and_timeout_cleanup(tmp_path, monkeypatch):
+    root = tmp_path / 'source'
+    _workspace_fixture(root)
+    store_dir = tmp_path / 'data'
+
+    def containers():
+        return subprocess.check_output(
+            ['docker', 'ps', '-a', '--filter', 'name=harness-workspace-', '--format', '{{.Names}}'],
+            text=True, timeout=10).splitlines()
+
+    before = set(containers())
+    with LocalStore(store_dir) as store:
+        save_plan(store, root, target='code/src/ApiExceptionHandler.java')
+        with TestClient(create_app(manager(store, policy(root)), workspace_probe=workspace.DockerProbe(timeout=2))) as client:
+            key = send(client).json()['approval_id']
+            assert decide(client, key).status_code == 200
+            request_path = f'/approvals/{key}/workspace'
+            with monkeypatch.context() as patch:
+                patch.setattr(workspace, 'PROBE', 'import time; time.sleep(30)')
+                timed_out = _workspace_request(client, key)
+            assert timed_out.status_code == 504, timed_out.text
+            assert timed_out.json()['code'] == 'workspace_timeout'
+            assert set(containers()) == before
+            assert list((store_dir / 'workspaces').iterdir()) == []
+            assert client.get(request_path, headers=token('alice')).status_code == 404
+            ready = _workspace_request(client, key)
+            assert ready.status_code == 200, ready.text
+            assert ready.json()['probe'] == {
+                'writable': ['code/src/ApiExceptionHandler.java'],
+                'readonly_denials': {'/work/__workspace_probe__': 30, '/work/code/src/OrderController.java': 30},
+                'interfaces': ['lo'], 'uid': 65534, 'container_removed': True,
+            }
+            assert set(containers()) == before
+            assert (root / 'src/ApiExceptionHandler.java').read_bytes() == b'before\r\n'
+            assert (root / 'src/OrderController.java').read_bytes() == b'neighbor\n'
 
 
 def test_restart_preserves_wait_and_concurrent_approval_creates_one_handoff(tmp_path):

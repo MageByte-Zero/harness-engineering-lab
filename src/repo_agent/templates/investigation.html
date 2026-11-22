@@ -19,8 +19,8 @@ const terminal=new Set(['completed','failed','cancelled','interrupted']);
 const labels={queued:'等待开始',running:'处理中',cancelling:'正在请求停止',completed:'执行结束',failed:'结果不可用',cancelled:'已停止',interrupted:'进程中断，请重新发起'};
 const kinds={answer_for_review:'回答待审阅',needs_information:'信息不足',unavailable:'结果不可用',plan_for_review:'修改计划 · 待人工审查',plan_needs_information:'计划需要补充条件'};
 const eventNames={queued:'运行已创建',running:'运行开始',model_started:'等待模型响应',tool_requested:'模型请求工具',tool_started:'工具开始执行',tool_finished:'工具已返回',cancel_requested:'取消已请求',completed:'执行结束',failed:'结果不可用',cancelled:'执行已停止',interrupted:'上次进程已中断，未自动重放'};
-const connections=new Map();let conversationEnabled=false;let conversationVersion=0;let authenticatedMode=false;let approvalEnabled=false;let approvalVersion=0;
-async function start(){const c=await api('/capabilities');conversationEnabled=c.conversations;authenticatedMode=c.authentication;approvalEnabled=c.approvals;document.querySelector('#auth-panel').hidden=!authenticatedMode;if(c.persistence)document.querySelector('#storage-hint').textContent='会话与结果保存在本地数据目录，重启后可重新查看。';if(authenticatedMode){try{await signedIn()}catch{setLoggedIn(false)}}else{document.querySelector('#conversation-panel').hidden=!conversationEnabled;if(conversationEnabled)await loadConversations()}}
+const connections=new Map();let conversationEnabled=false;let conversationVersion=0;let authenticatedMode=false;let approvalEnabled=false;let approvalVersion=0;let workspaceEnabled=false;
+async function start(){const c=await api('/capabilities');conversationEnabled=c.conversations;authenticatedMode=c.authentication;approvalEnabled=c.approvals;workspaceEnabled=c.workspaces;document.querySelector('#auth-panel').hidden=!authenticatedMode;if(c.persistence)document.querySelector('#storage-hint').textContent='会话与结果保存在本地数据目录，重启后可重新查看。';if(authenticatedMode){try{await signedIn()}catch{setLoggedIn(false)}}else{document.querySelector('#conversation-panel').hidden=!conversationEnabled;if(conversationEnabled)await loadConversations()}}
 function clearWorkspace(){for(const area of document.querySelectorAll('textarea'))area.value='';document.querySelector('#error').textContent='';for(const es of connections.values())es.close();connections.clear();conversationVersion++;approvalVersion++;document.querySelector('#approvals').replaceChildren();document.querySelector('#runs').replaceChildren();document.querySelector('#saved-runs').replaceChildren();document.querySelector('#conversation-id').value='';document.querySelector('#run-id').value='';document.querySelector('#saved-conversations').replaceChildren()}
 function setLoggedIn(yes){document.querySelector('#login').hidden=yes;document.querySelector('#identity-panel').hidden=!yes;for(const el of document.querySelectorAll('main > section:not(#auth-panel)'))el.hidden=!yes;document.querySelector('#conversation-panel').hidden=!yes||!conversationEnabled;document.querySelector('#approval-panel').hidden=!yes||!approvalEnabled}
 async function signedIn(){const s=await api('/session');document.querySelector('#actor').textContent='当前身份：'+s.principal;const menu=document.querySelector('#project');menu.replaceChildren();for(const id of s.projects){const o=node('option',id);o.value=id;menu.append(o)}clearWorkspace();setLoggedIn(true);await loadApprovals();if(s.projects.length)await loadConversations();else showError(Error('当前身份没有获准项目'))}
@@ -142,6 +142,26 @@ async function loadApprovals(){
    addButton('拒绝','/decision',{decision:'reject'});
   }
   if(record.can_withdraw)addButton('撤回','/withdraw',{});
+  if(workspaceEnabled&&record.can_prepare_workspace){
+   const prepare=node('button','准备工作区');
+   const result=node('p','');
+   result.setAttribute('role','status');
+   prepare.type='button';
+   prepare.onclick=async()=>{
+    prepare.disabled=true;
+    result.textContent='正在核对来源和工作区边界…';
+    try{
+     const response=await fetch('/approvals/'+encodeURIComponent(record.approval_id)+'/workspace',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_revision:record.plan_revision})
+     });
+     const data=await response.json();
+     result.textContent=response.ok?'工作区已就绪 '+data.workspace_id+' · '+data.targets.join('、'):
+      '准备失败（'+response.status+'） '+(data.code||data.detail);
+    }catch(error){result.textContent='准备请求未取得结果，刷新审批后可重新核对。'}
+    finally{prepare.disabled=false}
+   };
+   controls.append(prepare,result);
+  }
   card.append(controls);box.append(card);
  }
 }

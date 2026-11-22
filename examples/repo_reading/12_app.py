@@ -24,6 +24,7 @@ from repo_agent.persistence import LocalStore
 from repo_agent.skills import SkillLibrary
 from repo_agent.planning import PlanningRequest
 from repo_agent.access import load_local_access
+from repo_agent.workspace import DockerProbe
 
 
 def main():
@@ -41,6 +42,8 @@ def main():
     parser.add_argument('--plan-request', type=Path, help='JSON requirement; CLI only, creates a read-only change plan')
     parser.add_argument('--access-config', type=Path, help='Trusted local project grants; requires --conversation and --data-dir')
     parser.add_argument('--project', help='Requested project for authenticated CLI; AGENT_CREDENTIAL verifies the actor')
+    parser.add_argument('--prepare-workspace', action='store_true',
+                        help='Enable Docker workspace preparation for approved plans in Web mode')
     args = parser.parse_args()
     planning_request = None
     if args.plan_request:
@@ -53,6 +56,8 @@ def main():
         parser.error('--data-dir requires --conversation')
     if args.access_config and not (args.conversation and args.data_dir):
         parser.error('--access-config requires --conversation and --data-dir')
+    if args.prepare_workspace and (not args.access_config or args.question):
+        parser.error('--prepare-workspace requires --access-config and Web mode')
     if args.access_config and args.question and not (args.project and os.environ.get('AGENT_CREDENTIAL')):
         parser.error('Authenticated CLI requires --project and AGENT_CREDENTIAL')
     if args.conversation_id and not (args.data_dir and args.question):
@@ -152,7 +157,8 @@ def main():
                     if asyncio.run(execute_questions()):
                         raise SystemExit(1)
                 else:
-                    uvicorn.run(create_app(manager), host='127.0.0.1', port=args.port)
+                    probe = DockerProbe() if args.prepare_workspace else None
+                    uvicorn.run(create_app(manager, workspace_probe=probe), host='127.0.0.1', port=args.port)
             finally:
                 child.terminate()
                 try:

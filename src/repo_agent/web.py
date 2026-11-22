@@ -16,6 +16,7 @@ from repo_agent.planning import PlanningRequest
 from repo_agent.access import AccessDenied
 from repo_agent.approval import PlanApprovals
 from repo_agent.persistence import ApprovalConflict
+from repo_agent.workspace import DockerProbe, WorkspaceFailure, WorkspacePreparation
 
 
 class Submission(BaseModel):
@@ -39,9 +40,10 @@ class ReviewDecision(ApprovalRevision):
     decision: Literal['approve', 'reject']
 
 
-def create_app(manager):
+def create_app(manager, *, workspace_probe: DockerProbe | None = None):
     access = getattr(manager.worker, 'access', None)
     approvals = PlanApprovals(manager, manager.store, access) if access is not None and manager.store is not None else None
+    workspaces = WorkspacePreparation(approvals, workspace_probe) if approvals and workspace_probe else None
     @asynccontextmanager
     async def lifespan(app):
         yield
@@ -81,10 +83,19 @@ def create_app(manager):
     async def approval_conflict(request, exc):
         return JSONResponse({'detail': str(exc)}, status_code=409)
 
+    @app.exception_handler(WorkspaceFailure)
+    async def workspace_failure(request, exc: WorkspaceFailure):
+        return JSONResponse({'detail': str(exc), 'code': exc.code}, status_code=exc.status)
+
     def approval_service():
         if approvals is None:
             raise HTTPException(404, 'Approvals require persistent project access')
         return approvals
+
+    def workspace_service():
+        if workspaces is None:
+            raise HTTPException(404, 'Workspace preparation is disabled')
+        return workspaces
 
     def find(run_id, principal=None):
         if access is not None:
@@ -96,7 +107,8 @@ def create_app(manager):
     @app.get('/capabilities')
     async def capabilities():
         return {'conversations':hasattr(manager.worker, 'create'), 'persistence':manager.store is not None,
-                'authentication': access is not None, 'approvals': approvals is not None}
+                'authentication': access is not None, 'approvals': approvals is not None,
+                'workspaces': workspaces is not None}
 
     @app.post('/session')
     async def login(request: Request):
@@ -202,6 +214,17 @@ def create_app(manager):
     @app.post('/approvals/{approval_id}/withdraw')
     async def withdraw_approval(approval_id: str, body: ApprovalRevision, request: Request):
         return approval_service().withdraw(request.state.principal, approval_id, body.plan_revision)
+
+    @app.post('/approvals/{approval_id}/workspace')
+    async def prepare_workspace(approval_id: str, body: ApprovalRevision, request: Request):
+        return await workspace_service().prepare(request.state.principal, approval_id, body.plan_revision)
+
+    @app.get('/approvals/{approval_id}/workspace')
+    async def get_workspace(approval_id: str, request: Request):
+        workspace = workspace_service().get(request.state.principal, approval_id)
+        if workspace is None:
+            raise HTTPException(404, 'No ready workspace')
+        return workspace
 
     @app.post('/runs/{run_id}/cancel', status_code=202)
     async def cancel(run_id: str, request: Request):

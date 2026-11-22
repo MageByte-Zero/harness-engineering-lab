@@ -74,7 +74,9 @@ class PlanApprovals:
         expired = self.clock() >= datetime.fromisoformat(record['expires_at'])
         return {**record, 'expired': pending and expired,
                 'can_decide': not is_owner and pending and not expired,
-                'can_withdraw': is_owner and pending}
+                'can_withdraw': is_owner and pending,
+                'can_prepare_workspace': is_owner and record['state'] == 'approved'
+                    and record['handoff_id'] is not None}
 
     def get(self, principal, approval_id):
         return self._view(principal, self._get(approval_id))
