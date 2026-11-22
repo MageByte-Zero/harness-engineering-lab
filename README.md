@@ -4,13 +4,15 @@
 
 ## 当前实现
 
-第 23 讲固定入口为 `lesson-23-recovery-20261122`。本版接在 `lesson-22-independent-verification-20261122` 上，为受限编辑和独立检查增加应用进程中断后的核对与恢复。应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
+第 24 讲固定入口为 `lesson-24-observability-20261122`。本版接在 `lesson-23-recovery-20261122` 上，把模型调用、受限编辑、独立检查和重启恢复关联到同一应用的本地 Trace。应用可以读取限定资料、查询合成业务接口、生成带来源的结构化回答，并提供网页/CLI、进度事件、取消、连续会话和本地持久化。修改计划通过类型化提交工具交付，检查来源关联、目标文件和约束/接受条件覆盖后，保存为待审产物。任务方法按需加载；业务查询可以直接走 HTTP，也可以经过受控的本地 MCP stdio 服务。
 
 这些能力共用 `src/repo_agent/` 的一个应用包、一个 SDK Runner。启用 `--prepare-workspace` 后，申请人能从已批准交接准备工作区。应用复查授权和来源摘要，在 Docker 中验证只读基线与逐文件可写挂载，保存准备记录。准备探针由应用固定，执行完恢复副本。启用 `--edit-workspace` 后，申请人可从已就绪工作区发起一笔编辑。SDK Runner 只获得读取和精确替换工具，应用在单次尝试的副本里执行，生成可审阅、可下载的补丁。
 
 启用 `--verify-order-patch` 后，应用核对已保存补丁、批准版本和验收条件，在一次性验证副本上执行固定检查。Spring MockMvc 校验缺失订单和已有订单的状态码与响应体。开启试修后，只有业务断言失败才会把失败项送给原 Agent，在原批准范围内修一次，再用同一镜像复验。缺少镜像时，应用保留候选补丁并记录环境故障，模型不参与。
 
 中断恢复沿用原编辑及检查开关，启动后按原 Run 编号点「核对中断动作」。应用核对原授权、暂存和旧容器，完整回执接回原 Run。缺少完整回执的编辑保留现场，检查可对原候选只做独立复验。
+
+OpenTelemetry Python SDK 1.45.1 负责本地 Trace 的 span 与导出。使用持久运行目录时，从原 Run 页面打开「查看 Trace」，或用同一身份请求 `GET /runs/{run_id}/trace`。模型与工具 span 通过调用号摘要对应，恢复请求用 Span Link 关联原 Run。已结束的 span 保存到数据目录的 `traces`。接口同时展示既有 Run 事件与业务事实，供核对强杀后没有完成回执的动作。
 
 | 源文件 | 当前职责 |
 | --- | --- |
@@ -26,22 +28,23 @@
 | `editing.py` | 受限编辑工具、SDK 反馈、尝试清理与补丁生成 |
 | `verification.py` | 校验并应用候选补丁，运行独立检查，按结果启动一次修正 |
 | `recovery.py` | 持久化操作事实，核对旧容器和回执并给出恢复决定 |
+| `observability.py` | OpenTelemetry 本地导出、模型和工具 span、恢复关联与授权后的 Trace 视图 |
 | `application.py`、`web.py` | 用例与 Run 状态；FastAPI、SSE 和取消接口 |
 | `conversation.py`、`persistence.py` | 完整轮次选择/提交、SQLite 存储、重启与范围校验 |
 | `skills.py` | 受信本地任务方法包的按需加载和内容版本绑定 |
 
-包内有 22 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出。
+包内有 23 个 Python 文件（含 `__init__.py`）和一个网页模板。`examples/repo_reading/` 是薄入口和运行说明；`fixtures/` 是输入，`tests/` 是验证，忽略的 `runs/` 是每次运行的输出。
 
 ## 获取固定版本与最小运行
 
 需要 Git、Python 3.12、uv、ripgrep。第一次获取：
 
 ```bash
-git clone --branch lesson-23-recovery-20261122 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
+git clone --branch lesson-24-observability-20261122 --single-branch https://github.com/MageByte-Zero/harness-engineering-lab.git
 cd harness-engineering-lab
 ```
 
-已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-23-recovery-20261122` 和 `git switch --detach lesson-23-recovery-20261122`。已发布标签保持原义，后续修订使用新标签。
+已有仓库则先保存自己的改动，再执行 `git fetch origin tag lesson-24-observability-20261122` 和 `git switch --detach lesson-24-observability-20261122`。已发布标签保持原义，后续修订使用新标签。
 
 在根目录 `.env` 或进程环境配置 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。`.env.example` 是空值模板，程序不读取模板；已有 `.env` 不要覆盖，密钥不提交也不写进命令。模型需支持 Chat Completions 工具调用和本讲的结构化输出组合，标识 `auto` 不保证服务端模型身份稳定。
 
@@ -71,6 +74,14 @@ HARNESS_DOCKER_WORKSPACE_TEST=1 uv run --frozen python -m pytest tests/repo_agen
 ```
 
 测试默认用可控模型触发受限工具。配置原模型接口后，加 `HARNESS_RECOVERY_REAL_MODEL=1` 可用真实模型复现。恢复依赖同一 SQLite 数据目录和同一 Docker 后端。只有应用登记且归属匹配的容器会被清理，重复请求读回原决定。
+
+第 24 讲复用上述两份 Docker 镜像。用同一应用跑完整编辑、独立检查、SIGKILL 和重启后的 Trace 关联：
+
+```bash
+HARNESS_DOCKER_WORKSPACE_TEST=1 uv run --frozen python -m pytest tests/repo_agent/test_observability.py -s -q
+```
+
+默认使用可控模型，已有模型配置时可加 `HARNESS_RECOVERY_REAL_MODEL=1` 使用真实模型。Trace 本地导出，提示词、工具参数和原始业务正文由原运行边界管理。
 
 ## 验证与限制
 
@@ -103,6 +114,6 @@ MCP Python 2.3.0、Agents SDK 0.24.0 与其余依赖由 `uv.lock` 固定。MCP �
 
 ## 后续架构与仓库边界
 
-后续沿同一应用补齐 Trace、评测、发布与部署。按出现的职责逐步分包。当前模型执行仍由同一个 SDK Runner 驱动。
+后续沿同一应用完善评测、发布与部署。按出现的职责逐步分包。当前模型执行仍由同一个 SDK Runner 驱动。
 
 本公开仓库只保存源码、测试、合成输入、配置样例与开发者说明。付费正文、配图和写作证据在独立私有文稿库；真实运行副本、日志和补丁归入忽略的 `runs/<run-id>`，密钥和企业数据不发布。`fixtures/order-service` 与 `fixtures/order-service-missing` 是两个验收输入，均需保留。旧 `team_harness` 等工程仅查 Git 历史，不恢复平行应用；具体开发约束见 [AGENTS.md](AGENTS.md)。

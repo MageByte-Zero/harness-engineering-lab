@@ -19,6 +19,7 @@ from openai import APITimeoutError
 from pydantic import ValidationError
 
 from repo_agent.agent import INSTRUCTIONS, build_agent
+from repo_agent.observability import AgentSpans
 from repo_agent.tools import load_source_bundle, load_sources, source_hash
 from repo_agent.retrieval import collect_fixed, fixed_input, validate_queries
 from repo_agent import model as model_module
@@ -106,6 +107,8 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
             if emit is not None:
                 emit(kind, data)
 
+        spans = AgentSpans()
+
         class ObservationHooks(RunHooks):
             requested = 0
             read_observed = False
@@ -129,6 +132,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                 save()
                 if blocked:
                     raise ContextBudgetExceeded()
+                spans.model_start()
                 publish("model_started", call_index=len(record["model_inputs"]))
 
             async def on_llm_end(self, context, agent, response):
@@ -147,6 +151,9 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
                         calls.append(call)
                     elif item.type == "message":
                         text.extend(part.text for part in item.content if part.type == "output_text")
+                names = {tool.name for tool in agent.tools}
+                spans.model_end((call['name'] if call['name'] in names else 'unconfirmed_tool', call['id'])
+                                for call in calls)
                 record["events"].append({"node": "model", "state": {"messages": [
                     {"type": "ai", "content": "\n".join(text), "tool_calls": calls}]}})
                 for call in calls:
@@ -164,11 +171,13 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
             async def on_tool_start(self, context, agent, tool):
                 if not isinstance(context, ToolContext):
                     raise TypeError("Expected tool-call context")
+                spans.tool_start(tool.name, context.tool_call_id)
                 publish("tool_started", call_id=context.tool_call_id, tool=tool.name)
 
             async def on_tool_end(self, context, agent, tool, result):
                 if not isinstance(context, ToolContext) or not isinstance(result, dict):
                     raise TypeError("Repository tools require a tool-call context and a dictionary result")
+                spans.tool_end(context.tool_call_id, result.get("status"))
                 pending.discard(context.tool_call_id)
                 if planning_request is not None and tool.name == 'submit_change_plan':
                     submitted_plans.append(result['plan'])
@@ -284,6 +293,7 @@ async def run_repository_async(repo: Path | dict[str, Path], question: str, outp
             record["error"] = {"type": type(exc).__name__, "status_code": getattr(exc, "status_code", None)}
             record["stop_reason"] = stop
         finally:
+            spans.finish()
             record["finished_at"] = datetime.now(timezone.utc).isoformat()
             if structured_output:
                 record['answer_checks'] = assess_answer(record)

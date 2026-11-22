@@ -1,6 +1,6 @@
 """Loopback-only teaching API; routes delegate execution to the existing use case."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from functools import partial
 from hashlib import sha256
 import json
@@ -19,6 +19,7 @@ from repo_agent.access import AccessDenied
 from repo_agent.approval import PlanApprovals
 from repo_agent.persistence import ApprovalConflict
 from repo_agent.editing import edit_workspace
+from repo_agent.observability import trace_view
 from repo_agent.recovery import baseline_digest, reconcile
 from repo_agent.verification import OrderVerifier, authorized_contract, verify_patch
 from repo_agent.workspace import DockerProbe, WorkspaceFailure, WorkspacePreparation
@@ -297,27 +298,53 @@ def create_app(manager, *, workspace_probe: DockerProbe | None = None, enable_ed
     @app.post('/runs/{run_id}/recovery')
     async def recover_run(run_id: str, request: Request):
         principal = request.state.principal
-        async with manager.recovery_lock:
-            run = find(run_id, principal)
-            if run.recovery is not None:
-                return run.view()
-            operation = run.operation
-            if run.state != 'interrupted' or operation is None:
-                raise ApprovalConflict('No interrupted workspace operation to reconcile')
-            saved = operation['binding']
-            if operation['kind'] == 'verification':
-                if order_verifier is None:
-                    raise HTTPException(404, 'Independent verification is disabled')
-                candidate, directory, binding, _ = verification_inputs(operation['source_run_id'], principal)
-                if sha256(candidate['patch'].encode()).hexdigest() != operation['candidate_digest']:
-                    raise ApprovalConflict('Candidate content changed')
-            else:
-                directory, binding, _ = workspace_service().edit_inputs(principal, saved['approval_id'],
-                                                                      saved['plan_revision'])
-            if binding != saved:
-                raise ApprovalConflict('Interrupted operation binding changed')
-            decision, receipt = await reconcile(run, directory)
-            return manager.publish_recovery(run, decision, receipt).view()
+        original = find(run_id, principal)
+        audit = (manager.telemetry.recovery(run_id, original.trace_context)
+                 if manager.telemetry is not None else nullcontext())
+        with audit as span:
+            async with manager.recovery_lock:
+                run = find(run_id, principal)
+                if run.recovery is not None:
+                    if span is not None:
+                        span.set_attribute('harness.recovery.reused', True)
+                        span.set_attribute('harness.recovery.status', run.recovery['status'])
+                    return run.view()
+                operation = run.operation
+                if run.state != 'interrupted' or operation is None:
+                    raise ApprovalConflict('No interrupted workspace operation to reconcile')
+                saved = operation['binding']
+                if operation['kind'] == 'verification':
+                    if order_verifier is None:
+                        raise HTTPException(404, 'Independent verification is disabled')
+                    candidate, directory, binding, _ = verification_inputs(operation['source_run_id'], principal)
+                    if sha256(candidate['patch'].encode()).hexdigest() != operation['candidate_digest']:
+                        raise ApprovalConflict('Candidate content changed')
+                else:
+                    directory, binding, _ = workspace_service().edit_inputs(principal, saved['approval_id'],
+                                                                          saved['plan_revision'])
+                if binding != saved:
+                    raise ApprovalConflict('Interrupted operation binding changed')
+                decision, receipt = await reconcile(run, directory)
+                recovered = manager.publish_recovery(run, decision, receipt)
+                if span is not None:
+                    span.set_attribute('harness.recovery.reused', False)
+                    span.set_attribute('harness.recovery.status', decision['status'])
+                    span.set_attribute('harness.recovery.removed_containers', decision['removed_containers'])
+                return recovered.view()
+
+    @app.get('/runs/{run_id}/trace')
+    async def get_trace(run_id: str, request: Request):
+        run = find(run_id, request.state.principal)
+        if manager.telemetry is None:
+            raise HTTPException(404, 'Trace requires persistent runs')
+        try:
+            spans = manager.telemetry.exporter.read(run.run_id)
+        except ValueError:
+            # Legacy records may not use UUID Run IDs.
+            spans = []
+        except OSError as exc:
+            raise HTTPException(503, 'Trace cannot be read') from exc
+        return trace_view(run, spans)
 
     @app.get('/runs/{run_id}/patch')
     async def download_patch(run_id: str, request: Request):

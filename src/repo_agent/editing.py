@@ -14,6 +14,7 @@ from pydantic import Field
 from repo_agent import model as model_module
 from repo_agent.agent import build_agent
 from repo_agent.tools import source_hash
+from repo_agent.observability import AgentSpans
 from repo_agent.workspace import WorkspaceFailure
 
 
@@ -108,14 +109,18 @@ class EditHooks(RunHooks):
     def __init__(self, emit):
         self.emit = emit
         self.requests = 0
+        self.spans = AgentSpans()
 
     async def on_llm_start(self, context, agent, system_prompt, input_items):
         feedback = sum(isinstance(item, dict) and item.get('type') == 'function_call_output'
                        for item in input_items)
+        self.spans.model_start()
         self.emit('model_started', {'tool_outputs_in_input': feedback})
 
     async def on_llm_end(self, context, agent, response):
         calls = [item for item in response.output if item.type == 'function_call']
+        names = {tool.name for tool in agent.tools}
+        self.spans.model_end((item.name if item.name in names else 'unconfirmed_tool', item.call_id) for item in calls)
         self.requests += len(calls)
         for item in calls:
             self.emit('tool_requested', {'tool': item.name, 'call_id': item.call_id})
@@ -125,12 +130,14 @@ class EditHooks(RunHooks):
     async def on_tool_start(self, context, agent, tool):
         if not isinstance(context, ToolContext):
             raise TypeError('Expected tool-call context')
+        self.spans.tool_start(tool.name, context.tool_call_id)
         self.emit('tool_started', {'tool': tool.name, 'call_id': context.tool_call_id})
 
     async def on_tool_end(self, context, agent, tool, result):
         if not isinstance(context, ToolContext) or not isinstance(result, dict):
             raise TypeError('Expected tool-call context and a dictionary result')
         details = {key: result[key] for key in ('status', 'path', 'sha256', 'container_removed') if key in result}
+        self.spans.tool_end(context.tool_call_id, result.get('status'))
         self.emit('tool_finished', {'tool': tool.name, 'call_id': context.tool_call_id, **details})
 
 
@@ -168,6 +175,7 @@ async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run
 
         request = plan['request']
         model = model_module.create_model()
+        hooks = EditHooks(emit)
         try:
             agent = build_agent(model, None, instructions=EDIT_INSTRUCTIONS, extra_tools=files.tools())
             task = {'goal': request['goal'],
@@ -176,8 +184,9 @@ async def edit_workspace(directory: Path, binding: dict, plan: dict, docker, run
                 task['verification_failures'] = feedback
             async with asyncio.timeout(90):
                 await Runner.run(agent, json.dumps(task, ensure_ascii=False), max_turns=10,
-                    hooks=EditHooks(emit), run_config=RunConfig(tracing_disabled=True))
+                    hooks=hooks, run_config=RunConfig(tracing_disabled=True))
         finally:
+            hooks.spans.finish()
             if isinstance(model, model_module.ConfiguredModel):
                 await model.aclose()
 

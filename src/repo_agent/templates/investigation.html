@@ -61,6 +61,11 @@ async function watch(id){
  let es;async function refresh(){let run=await api('/runs/'+encodeURIComponent(id));status.textContent=labels[run.state]||run.state;cancel.disabled=terminal.has(run.state)||run.cancel_requested;
  if(run.context_selection&&run.context_selection.omitted_turns)status.textContent+=' · 已省略 '+run.context_selection.omitted_turns+' 轮历史';
  if(run.result){result.replaceChildren(node('h3',kinds[run.result.kind]||run.result.kind));if(run.result.artifact)renderPlan(result,run.result);if(approvalEnabled&&run.result.kind==='plan_for_review')addReviewForm(result,run);if(run.result.conclusion)result.append(node('p',run.result.conclusion));if(run.result.facts?.length){let facts=node('ul','');for(let f of run.result.facts)facts.append(node('li',f.statement+' ['+f.source_ids.join(', ')+']'));result.append(facts)}if(run.result.gaps?.length)result.append(node('p','缺口：'+run.result.gaps.join('；')));if(['patch_for_review','verification_for_review'].includes(run.result.kind)){const download=node('a','下载补丁');download.href='/runs/'+encodeURIComponent(id)+'/patch';result.append(download,node('pre',run.result.patch))}if(verificationEnabled&&run.result.kind==='patch_for_review')addVerificationButtons(result,id);if(run.result.kind!=='unavailable'&&run.result.kind!=='patch_for_review'&&run.result.kind!=='verification_for_review'&&!run.result.artifact)result.append(node('p','来源关联经过程序检查，回答含义仍需审阅。'));let details=node('details','');details.append(node('summary','查看来源、检查与完整结果'),node('pre',JSON.stringify(run.result,null,2)));result.append(details)}
+ if(run.trace_context){
+  const trace=node('a','查看 Trace');
+  trace.href='/runs/'+encodeURIComponent(id)+'/trace';trace.target='_blank';trace.rel='noopener';
+  const traceLine=node('p','');traceLine.append(trace);result.append(traceLine);
+ }
  if(run.recovery){
   const recovery=node('div','');result.append(recovery);
   if(run.recovery.status==='pending'){

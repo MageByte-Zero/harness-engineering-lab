@@ -9,6 +9,7 @@ from tempfile import mkdtemp
 from uuid import uuid4
 
 from repo_agent.editing import edit_workspace
+from repo_agent.observability import child
 from repo_agent.persistence import ApprovalConflict
 from repo_agent.workspace import WorkspaceFailure, _bind, container_args, run_container
 
@@ -124,6 +125,8 @@ async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verif
                 receipt['outcome'] = 'candidate_unavailable'
                 break
             emit('verification_started', {'attempt': index + 1})
+            span = child('agent.verification', **{'harness.check.attempt': index + 1,
+                                                  'harness.source_run_id': original['run_id']})
             try:
                 options = {}
                 if journal is not None:
@@ -139,13 +142,22 @@ async def verify_patch(directory: Path, binding: dict, plan: dict, docker, verif
                     raise ValueError('Verifier image changed between attempts')
                 receipt['verifier_image_id'] = image_id
                 checks = _checked_rows(report)
+                failures = [row for row in checks if not row['passed']]
+                if span is not None:
+                    span.set_attribute('harness.check.count', len(checks))
+                    span.set_attribute('harness.check.failed_count', len(failures))
+                    span.set_attribute('harness.check.outcome', 'requirements_failed' if failures else 'verified')
             except (WorkspaceFailure, ValueError) as exc:
                 receipt['outcome'] = 'environment_failure'
                 receipt['reason'] = exc.code if isinstance(exc, WorkspaceFailure) else 'invalid_verifier_output'
                 preserve = receipt['reason'] == 'workspace_cleanup_unconfirmed'
                 emit('verification_finished', {'attempt': index + 1, 'status': receipt['outcome']})
+                if span is not None:
+                    span.set_attribute('harness.check.outcome', 'environment_failure')
                 break
-            failures = [row for row in checks if not row['passed']]
+            finally:
+                if span is not None:
+                    span.end()
             receipt['checks'] = checks
             receipt['outcome'] = 'requirements_failed' if failures else 'verified'
             emit('verification_finished', {'attempt': index + 1, 'status': receipt['outcome']})

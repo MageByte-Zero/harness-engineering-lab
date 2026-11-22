@@ -1,5 +1,6 @@
 """One investigation use case and bounded, process-local run ownership."""
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ from uuid import uuid4
 from repo_agent.business import BusinessClient, BUSINESS_INSTRUCTIONS
 from repo_agent.execution import run_repository_async
 from repo_agent.output import consume_answer
+from repo_agent.observability import RunTelemetry, reference
 
 
 async def investigate(sources, question, output, *, business_url, business_token, run_id=None, emit=None, session=None, conversation=None, skills=None, business_transport="http", planning_request=None, allowed_orders=None, ownership=None):
@@ -48,6 +50,7 @@ class ActiveRun:
 
     operation: dict | None = None
     recovery: dict | None = None
+    trace_context: dict | None = None
 
     def emit(self, kind, data=None):
         self.events.append({'seq': len(self.events) + 1, 'run_id': self.run_id,
@@ -59,6 +62,8 @@ class ActiveRun:
                 'conversation_id': self.conversation_id, 'context_selection': self.context_selection,
                 **({'planning_request': self.planning_request} if self.planning_request is not None else {}),
                 **({'ownership': self.ownership} if self.ownership is not None else {})}
+        if self.trace_context is not None:
+            result['trace_context'] = self.trace_context
         if durable and self.operation is not None:
             result.update(operation=self.operation, recovery=self.recovery)
         elif self.recovery is not None or (self.operation is not None and self.state == 'interrupted'):
@@ -75,6 +80,7 @@ class RunManager:
         self.closed = False
         self.recovery_lock = asyncio.Lock()
         self.store = getattr(worker, 'store', None)
+        self.telemetry = RunTelemetry(self.store.directory / 'traces') if self.store is not None else None
         if self.store is not None:
             for saved in self.store.load_runs():
                 if getattr(worker, 'access', None) is None and saved['view'].get('ownership'):
@@ -127,6 +133,11 @@ class RunManager:
             raise CapacityExceeded()
 
     def _enqueue(self, run, conversation=None, *, job=None):
+        root_span = None
+        if self.telemetry is not None:
+            kind = run.operation['kind'] if run.operation is not None else 'investigation'
+            root_span = self.telemetry.start(run.run_id, kind)
+            run.trace_context = reference(root_span)
         run.emit('queued')
         try:
             if self.store is not None:
@@ -134,12 +145,28 @@ class RunManager:
         except Exception:
             if conversation is not None:
                 conversation.busy = False
+            if root_span is not None:
+                root_span.end()
             raise
         self.runs[run.run_id] = run
-        run.task = asyncio.create_task(self._execute(run, conversation, job=job))
+        run.task = asyncio.create_task(self._execute(run, conversation, job=job, root_span=root_span))
         return run
 
-    async def _execute(self, run, conversation=None, *, job=None):
+    async def _execute(self, run, conversation=None, *, job=None, root_span=None):
+        active_trace = (self.telemetry.activate(root_span)
+                        if self.telemetry is not None and root_span is not None else nullcontext())
+        try:
+            with active_trace:
+                await self._run(run, conversation, job=job)
+        finally:
+            if root_span is not None:
+                root_span.set_attribute('harness.run_state', run.state)
+                kind = (run.result or {}).get('kind')
+                if kind:
+                    root_span.set_attribute('harness.result_kind', kind)
+                root_span.end()
+
+    async def _run(self, run, conversation=None, *, job=None):
         try:
             if run.cancel_requested:
                 run.state = 'cancelled'
